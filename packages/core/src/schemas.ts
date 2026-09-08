@@ -53,6 +53,7 @@ export const findingSchema = z.object({
       reasoning: z.string(),
       triagedAt: z.string(),
       model: z.string(),
+      confidence: z.number().optional(),
     })
     .optional(),
   revalidation: revalidationSchema.optional(),

@@ -57,8 +57,11 @@ export async function triageCommand(opts: {
     }
   }
 
-  // Sage exposes exactly one model and the batch request carries no model field,
-  // so an unhonorable --model would make run meta disagree with every record it writes.
+  // Run meta records the primary model the run was launched with; each finding
+  // records the effective model that produced it, which is Sage for decisions it
+  // made and claude-sonnet-4-6 for anything the fallback handled. Sage exposes
+  // exactly one model and the batch request carries no model field, so accepting
+  // another --model here would put a value in run meta that nothing ever ran.
   if (provider === "sage" && !opts.sage && opts.model && opts.model !== SAGE_MODEL_NAME) {
     throw new Error(
       `Model "${opts.model}" is not available for the sage provider. Expected "${SAGE_MODEL_NAME}".`,

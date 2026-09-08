@@ -5,7 +5,14 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Finding } from "@deepsec/core";
 import { ensureProject, listRuns, loadAllFileRecords, writeFileRecord } from "@deepsec/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LevantoSageClient, SageBatchResponse } from "../sage/client.js";
+import {
+  LevantoSageAuthError,
+  type LevantoSageClient,
+  LevantoSageQuotaError,
+  LevantoSageServerError,
+  LevantoSageValidationError,
+  type SageBatchResponse,
+} from "../sage/client.js";
 import { CLAUDE_DEFAULT_MODEL, formatFindingForSage, SAGE_MODEL_NAME, triage } from "../triage.js";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
@@ -80,6 +87,29 @@ describe("Sage Triage", () => {
       expect(formatted).not.toContain("Lines:");
       expect(formatted).not.toContain("Recommendation:");
     });
+  });
+
+  it("prepends project context when it is supplied", () => {
+    const finding: Finding = {
+      title: "Hardcoded credential on an internal route",
+      severity: "MEDIUM",
+      vulnSlug: "secret-in-code",
+      description: "Static token in the handler",
+      lineNumbers: [7],
+      confidence: "high",
+      recommendation: "Move to the secret store",
+    };
+
+    const formatted = formatFindingForSage(
+      finding,
+      "src/internal/route.ts",
+      "All /internal/* routes sit behind mTLS at the edge.",
+    );
+
+    expect(formatted).toContain(
+      "Project Context: All /internal/* routes sit behind mTLS at the edge.",
+    );
+    expect(formatted).toContain("Title: Hardcoded credential on an internal route");
   });
 
   describe("Sage provider evaluation", () => {
@@ -965,6 +995,231 @@ describe("Sage Triage", () => {
       const after = loadAllFileRecords(projectId);
       const priorities = after.map((r) => r.findings[0].triage?.priority).sort();
       expect(priorities).toEqual(["P1", "P2"]);
+    });
+  });
+
+  describe("permanent Sage failures", () => {
+    function writeOneFinding(filePath: string, title: string) {
+      writeFileRecord({
+        projectId,
+        filePath,
+        fileHash: `hash-${filePath}`,
+        status: "analyzed",
+        lastScannedAt: new Date().toISOString(),
+        lastScannedRunId: "run1",
+        candidates: [],
+        findings: [
+          {
+            title,
+            severity: "MEDIUM",
+            vulnSlug: "generic",
+            description: "some issue",
+            lineNumbers: [1],
+            confidence: "high",
+            recommendation: "fix it",
+          },
+        ],
+        analysisHistory: [],
+      });
+    }
+
+    for (const [label, makeError] of [
+      ["auth", () => new LevantoSageAuthError("revoked key", { status: 401 })],
+      ["quota", () => new LevantoSageQuotaError("out of credits", { status: 402 })],
+      ["validation", () => new LevantoSageValidationError("bad request", { status: 400 })],
+    ] as const) {
+      it(`aborts the run on a ${label} error instead of re-triaging with Claude`, async () => {
+        writeOneFinding("src/one.ts", "First finding");
+        writeOneFinding("src/two.ts", "Second finding");
+
+        const mockSageClient = {
+          decideBatch: vi.fn(async () => {
+            throw makeError();
+          }),
+        } as unknown as LevantoSageClient;
+
+        await expect(
+          triage({
+            projectId,
+            severity: "MEDIUM",
+            provider: "sage",
+            fallbackToClaude: true,
+            sageClient: mockSageClient,
+          }),
+        ).rejects.toThrow(makeError().constructor as never);
+
+        // The expensive provider the user opted out of is never reached, and the
+        // run is not recorded as a success.
+        expect(vi.mocked(query)).not.toHaveBeenCalled();
+        expect(listRuns(projectId).map((r) => r.phase)).toContain("error");
+        for (const record of loadAllFileRecords(projectId)) {
+          expect(record.findings[0].triage).toBeUndefined();
+        }
+      });
+    }
+
+    it("still falls back to Claude on a transient Sage error", async () => {
+      writeOneFinding("src/transient.ts", "Transient finding");
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              title: "Transient finding",
+              priority: "P1",
+              exploitability: "moderate",
+              impact: "medium",
+              reasoning: "Claude fallback verdict",
+            },
+          ]),
+        } as any;
+      } as any);
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => {
+          throw new LevantoSageServerError("service unavailable", { status: 503 });
+        }),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        fallbackToClaude: true,
+        sageClient: mockSageClient,
+      });
+
+      expect(result).toEqual({ triaged: 1, p0: 0, p1: 1, p2: 0, skip: 0 });
+      expect(listRuns(projectId).map((r) => r.phase)).toContain("done");
+    });
+  });
+
+  describe("calibrated confidence", () => {
+    it("persists the Sage confidence as a structured field and passes project context", async () => {
+      fs.writeFileSync(
+        path.join(tmpDir, projectId, "INFO.md"),
+        "All /internal/* routes sit behind mTLS at the edge.",
+      );
+
+      writeFileRecord({
+        projectId,
+        filePath: "src/conf.ts",
+        fileHash: "hash-conf",
+        status: "analyzed",
+        lastScannedAt: new Date().toISOString(),
+        lastScannedRunId: "run1",
+        candidates: [],
+        findings: [
+          {
+            title: "Confidence finding",
+            severity: "MEDIUM",
+            vulnSlug: "generic",
+            description: "some issue",
+            lineNumbers: [1],
+            confidence: "high",
+            recommendation: "fix it",
+          },
+        ],
+        analysisHistory: [],
+      });
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: {
+                      chosen: "P0",
+                      confidence: 0.93,
+                      probabilities: [{ option: "P0", probability: 0.93 }],
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        sageClient: mockSageClient,
+      });
+
+      // Survives a full reload, so the schema accepts the new field.
+      const triaged = loadAllFileRecords(projectId)[0].findings[0].triage;
+      expect(triaged?.priority).toBe("P0");
+      expect(triaged?.confidence).toBe(0.93);
+
+      const sent = vi.mocked(mockSageClient.decideBatch).mock.calls[0][0];
+      expect(sent.requests[0].content).toContain(
+        "Project Context: All /internal/* routes sit behind mTLS at the edge.",
+      );
+    });
+
+    it("omits confidence when Sage does not report one", async () => {
+      writeFileRecord({
+        projectId,
+        filePath: "src/noconfidence.ts",
+        fileHash: "hash-noconf",
+        status: "analyzed",
+        lastScannedAt: new Date().toISOString(),
+        lastScannedRunId: "run1",
+        candidates: [],
+        findings: [
+          {
+            title: "No confidence finding",
+            severity: "MEDIUM",
+            vulnSlug: "generic",
+            description: "some issue",
+            lineNumbers: [1],
+            confidence: "high",
+            recommendation: "fix it",
+          },
+        ],
+        analysisHistory: [],
+      });
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P2", probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        sageClient: mockSageClient,
+      });
+
+      const triaged = loadAllFileRecords(projectId)[0].findings[0].triage;
+      expect(triaged?.priority).toBe("P2");
+      expect(triaged?.confidence).toBeUndefined();
     });
   });
 

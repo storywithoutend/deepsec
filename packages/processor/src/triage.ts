@@ -13,13 +13,17 @@ import {
   writeRunMeta,
 } from "@deepsec/core";
 import {
+  LevantoSageAuthError,
   LevantoSageClient,
+  LevantoSageQuotaError,
+  LevantoSageValidationError,
   type SageChoiceResult,
   type SageOption,
   type SageOptionProbability,
 } from "./sage/client.js";
 
 const TRIAGE_BATCH_SIZE = 30;
+const PROJECT_INFO_CHAR_LIMIT = 2000;
 
 export const SAGE_MODEL_NAME = "levanto-sage-v0.8";
 export const CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6";
@@ -121,8 +125,13 @@ export interface TriageResult {
 /**
  * Format a finding into structured text content for evaluation by Sage.
  */
-export function formatFindingForSage(finding: Finding, filePath?: string): string {
+export function formatFindingForSage(
+  finding: Finding,
+  filePath?: string,
+  projectInfo?: string,
+): string {
   const parts: string[] = [
+    projectInfo ? `Project Context: ${projectInfo.slice(0, PROJECT_INFO_CHAR_LIMIT)}` : null,
     `Title: ${finding.title}`,
     filePath ? `File: ${filePath}` : null,
     `Severity: ${finding.severity}`,
@@ -145,6 +154,14 @@ function defaultExploitability(priority: TriagePriority): "trivial" | "moderate"
     default:
       return "difficult";
   }
+}
+
+function isPermanentSageError(err: unknown): boolean {
+  return (
+    err instanceof LevantoSageAuthError ||
+    err instanceof LevantoSageQuotaError ||
+    err instanceof LevantoSageValidationError
+  );
 }
 
 function isTriagePriority(value: unknown): value is TriagePriority {
@@ -217,7 +234,7 @@ async function runClaudeTriageBatch(
 
   const prompt = `You are a security triage expert. Given a list of vulnerability findings, classify each by priority for remediation.
 
-${projectInfo ? `## Project Context (summary only)\n\n${projectInfo.slice(0, 2000)}\n` : ""}
+${projectInfo ? `## Project Context (summary only)\n\n${projectInfo.slice(0, PROJECT_INFO_CHAR_LIMIT)}\n` : ""}
 
 ## Findings to Triage
 
@@ -428,6 +445,8 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
   const sageClient =
     provider === "sage" ? (params.sageClient ?? new LevantoSageClient()) : undefined;
 
+  let fatalSageError: unknown;
+
   async function triageBatchWithSage(batch: typeof toTriage, batchIdx: number) {
     batchesInFlight++;
     emit({
@@ -451,7 +470,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
 
     try {
       const requests = batch.map((item) => ({
-        content: formatFindingForSage(item.finding, item.record.filePath),
+        content: formatFindingForSage(item.finding, item.record.filePath, projectInfo),
         questions: [
           {
             id: "priority",
@@ -553,6 +572,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
             reasoning,
             triagedAt: new Date().toISOString(),
             model: SAGE_MODEL_NAME,
+            ...(hasConfidence ? { confidence } : {}),
           },
         });
       }
@@ -574,6 +594,21 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
     } catch (err) {
       // Sage failed before any verdict was committed — the whole batch is still
       // untriaged, so it can be retried in full without double counting.
+
+      // Auth, quota and request-shape errors are permanent for the whole run:
+      // retrying them per batch would silently redirect the entire corpus to
+      // Claude while every batch reports the same failure.
+      if (isPermanentSageError(err)) {
+        fatalSageError ??= err;
+        batchesInFlight--;
+        batchesCompleted++;
+        emit({
+          type: "batch_complete",
+          message: `Levanto Sage failed permanently on batch ${batchIdx + 1}: ${err instanceof Error ? err.message : String(err)} — aborting the run instead of falling back to Claude`,
+        });
+        return;
+      }
+
       if (fallbackToClaude) {
         emit({
           type: "batch_started",
@@ -704,12 +739,14 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
 
   if (concurrency <= 1) {
     for (let i = 0; i < batches.length; i++) {
+      if (fatalSageError) break;
       await batchRunner(batches[i], i);
     }
   } else {
     let nextIdx = 0;
     async function worker() {
       while (nextIdx < batches.length) {
+        if (fatalSageError) return;
         const idx = nextIdx++;
         await batchRunner(batches[idx], idx);
       }
@@ -717,6 +754,13 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
     await Promise.all(
       Array.from({ length: Math.min(concurrency, batches.length) }, () => worker()),
     );
+  }
+
+  if (fatalSageError) {
+    completeRun(projectId, meta.runId, "error", {
+      findingsRevalidated: totalTriaged,
+    });
+    throw fatalSageError;
   }
 
   completeRun(projectId, meta.runId, "done", {
