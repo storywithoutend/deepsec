@@ -13,7 +13,7 @@ Both have dedicated guides:
 packages/
   core/                Types, schemas, plugin contracts, config loader
   scanner/             Regex matchers + scanning engine
-  processor/           AI agent integration (Claude SDK, Codex SDK), enrich, triage, revalidate
+  processor/           AI agent integration (Claude SDK, Codex SDK, Levanto Sage), enrich, triage, revalidate
   deepsec/              Publishable package: bundled CLI + the `deepsec/config` sub-export + the @vercel/sandbox executor
 e2e/                   End-to-end tests against a fixture project
 fixtures/

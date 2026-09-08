@@ -133,9 +133,10 @@ token, no environment variables. Later commands (`process`,
 machine-wide login — if it's missing, the agent SDK itself reports a
 clear error on first use.
 
-Two caveats: the login must exist for the harness you actually run
+Three caveats: the login must exist for the harness you actually run
 (`claude` for `--agent claude`, a logged-in `codex` for `--agent codex`),
-and `sandbox` commands still need a real API token
+`triage --sage` still needs a `SAGE_API_KEY` because a Levanto key has no
+local-login equivalent, and `sandbox` commands still need a real API token
 (`AI_GATEWAY_API_KEY`), because a machine-local login can't be brokered
 into an isolated sandbox.
 
