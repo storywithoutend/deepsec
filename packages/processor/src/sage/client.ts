@@ -225,7 +225,16 @@ function parseRetryAfterMs(header: string | null): number | undefined {
   return Math.min(Math.max(at - Date.now(), 0), MAX_RETRY_AFTER_MS);
 }
 
-function isRetryable(err: unknown): err is LevantoSageServerError | LevantoSageRateLimitError {
+/**
+ * The single source of truth for which Sage failures are worth another
+ * round trip. Everything else — 400/401/402/403 and any other non-2xx
+ * status — is deterministic, so callers can treat "not retryable" as
+ * "permanent for this run". Network and timeout failures are normalized
+ * to `LevantoSageServerError`, so they stay retryable.
+ */
+export function isRetryableSageError(
+  err: unknown,
+): err is LevantoSageServerError | LevantoSageRateLimitError {
   return err instanceof LevantoSageServerError || err instanceof LevantoSageRateLimitError;
 }
 
@@ -361,10 +370,10 @@ export class LevantoSageClient {
         // Only 5xx, 429 and network/timeout failures are worth another round trip;
         // every other Sage error (400/401/402/403 and any other non-2xx status) is
         // deterministic and surfaces immediately.
-        if (err instanceof LevantoSageError && !isRetryable(err)) {
+        if (err instanceof LevantoSageError && !isRetryableSageError(err)) {
           throw err;
         }
-        if (isRetryable(err) && attempt >= maxAttempts) {
+        if (isRetryableSageError(err) && attempt >= maxAttempts) {
           throw err;
         }
 

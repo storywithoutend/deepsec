@@ -13,10 +13,9 @@ import {
   writeRunMeta,
 } from "@deepsec/core";
 import {
-  LevantoSageAuthError,
+  isRetryableSageError,
   LevantoSageClient,
-  LevantoSageQuotaError,
-  LevantoSageValidationError,
+  LevantoSageError,
   type SageChoiceResult,
   type SageOption,
   type SageOptionProbability,
@@ -157,11 +156,7 @@ function defaultExploitability(priority: TriagePriority): "trivial" | "moderate"
 }
 
 function isPermanentSageError(err: unknown): boolean {
-  return (
-    err instanceof LevantoSageAuthError ||
-    err instanceof LevantoSageQuotaError ||
-    err instanceof LevantoSageValidationError
-  );
+  return err instanceof LevantoSageError && !isRetryableSageError(err);
 }
 
 function isTriagePriority(value: unknown): value is TriagePriority {
@@ -532,7 +527,11 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
           continue;
         }
 
-        const hasConfidence = typeof confidence === "number" && Number.isFinite(confidence);
+        const hasConfidence =
+          typeof confidence === "number" &&
+          Number.isFinite(confidence) &&
+          confidence >= 0 &&
+          confidence <= 1;
 
         // Check calibrated confidence threshold. A missing or non-numeric confidence
         // cannot clear the floor.

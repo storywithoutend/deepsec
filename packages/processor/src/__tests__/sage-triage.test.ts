@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LevantoSageAuthError,
   type LevantoSageClient,
+  LevantoSageError,
   LevantoSageQuotaError,
   LevantoSageServerError,
   LevantoSageValidationError,
@@ -1027,6 +1028,11 @@ describe("Sage Triage", () => {
       ["auth", () => new LevantoSageAuthError("revoked key", { status: 401 })],
       ["quota", () => new LevantoSageQuotaError("out of credits", { status: 402 })],
       ["validation", () => new LevantoSageValidationError("bad request", { status: 400 })],
+      // Any other non-2xx status arrives as a plain LevantoSageError and is just
+      // as permanent — 422 is what a detail-shaped API returns for a bad shape.
+      ["unprocessable", () => new LevantoSageError("unprocessable entity", { status: 422 })],
+      ["payload-too-large", () => new LevantoSageError("payload too large", { status: 413 })],
+      ["not-found", () => new LevantoSageError("no such endpoint", { status: 404 })],
     ] as const) {
       it(`aborts the run on a ${label} error instead of re-triaging with Claude`, async () => {
         writeOneFinding("src/one.ts", "First finding");
@@ -1165,6 +1171,126 @@ describe("Sage Triage", () => {
       expect(sent.requests[0].content).toContain(
         "Project Context: All /internal/* routes sit behind mTLS at the edge.",
       );
+    });
+
+    it("treats an out-of-range confidence as missing rather than persisting it", async () => {
+      writeFileRecord({
+        projectId,
+        filePath: "src/outofrange.ts",
+        fileHash: "hash-oor",
+        status: "analyzed",
+        lastScannedAt: new Date().toISOString(),
+        lastScannedRunId: "run1",
+        candidates: [],
+        findings: [
+          {
+            title: "Out of range confidence finding",
+            severity: "MEDIUM",
+            vulnSlug: "generic",
+            description: "some issue",
+            lineNumbers: [1],
+            confidence: "high",
+            recommendation: "fix it",
+          },
+        ],
+        analysisHistory: [],
+      });
+
+      // A 0-100 scale reading would otherwise clear any --min-confidence floor.
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P0", confidence: 95, probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        minConfidence: 0.9,
+        fallbackToClaude: false,
+        sageClient: mockSageClient,
+      });
+
+      expect(result).toEqual({ triaged: 0, p0: 0, p1: 0, p2: 0, skip: 0 });
+      expect(loadAllFileRecords(projectId)[0].findings[0].triage).toBeUndefined();
+    });
+
+    it("keeps the boundary confidences 0 and 1", async () => {
+      for (const [file, value] of [
+        ["src/zero.ts", 0],
+        ["src/one.ts", 1],
+      ] as const) {
+        writeFileRecord({
+          projectId,
+          filePath: file,
+          fileHash: `hash-${file}`,
+          status: "analyzed",
+          lastScannedAt: new Date().toISOString(),
+          lastScannedRunId: "run1",
+          candidates: [],
+          findings: [
+            {
+              title: `Boundary ${value} finding`,
+              severity: "MEDIUM",
+              vulnSlug: "generic",
+              description: "some issue",
+              lineNumbers: [1],
+              confidence: "high",
+              recommendation: "fix it",
+            },
+          ],
+          analysisHistory: [],
+        });
+      }
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async (req: { requests: { content: string }[] }) => ({
+          results: req.requests.map((r) => ({
+            answers: [
+              {
+                ok: true,
+                result: {
+                  id: "priority",
+                  kind: "choice",
+                  result: {
+                    chosen: "P2",
+                    confidence: r.content.includes("Boundary 0 finding") ? 0 : 1,
+                    probabilities: [],
+                  },
+                },
+              },
+            ],
+          })),
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        sageClient: mockSageClient,
+      });
+
+      const confidences = loadAllFileRecords(projectId)
+        .map((r) => r.findings[0].triage?.confidence)
+        .sort();
+      expect(confidences).toEqual([0, 1]);
     });
 
     it("omits confidence when Sage does not report one", async () => {

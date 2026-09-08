@@ -83,6 +83,7 @@ export {
   resolveDuplicateRef,
 } from "./reconcile.js";
 export {
+  isRetryableSageError,
   LevantoSageAuthError,
   LevantoSageClient,
   type LevantoSageClientOptions,

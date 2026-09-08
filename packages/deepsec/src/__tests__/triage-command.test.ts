@@ -78,13 +78,24 @@ describe("triageCommand option resolution", () => {
     expect(vi.mocked(triage)).not.toHaveBeenCalled();
   });
 
+  it("rejects --no-claude-fallback when the sage provider was not selected", async () => {
+    await expect(triageCommand({ claudeFallback: false })).rejects.toThrow(/Sage triage only/);
+    expect(vi.mocked(triage)).not.toHaveBeenCalled();
+  });
+
   it("accepts the Sage-only flags under --sage", async () => {
-    await triageCommand({ sage: true, minConfidence: 0.9, latencyMode: "fast" });
+    await triageCommand({
+      sage: true,
+      minConfidence: 0.9,
+      latencyMode: "fast",
+      claudeFallback: false,
+    });
 
     const args = vi.mocked(triage).mock.calls[0][0];
     expect(args.provider).toBe("sage");
     expect(args.minConfidence).toBe(0.9);
     expect(args.latencyMode).toBe("fast");
+    expect(args.fallbackToClaude).toBe(false);
   });
 
   it("still honors --model for the claude provider", async () => {

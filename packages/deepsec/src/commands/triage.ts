@@ -33,7 +33,7 @@ export async function triageCommand(opts: {
   // overriding whatever --provider/--model said.
   const provider: "claude" | "sage" = opts.sage || opts.provider === "sage" ? "sage" : "claude";
 
-  // Both only steer the Sage decision model; the Claude path never reads them,
+  // These only steer the Sage decision model; the Claude path never reads them,
   // so accepting them there would report settings that do nothing.
   if (provider !== "sage") {
     if (opts.minConfidence !== undefined) {
@@ -41,6 +41,9 @@ export async function triageCommand(opts: {
     }
     if (opts.latencyMode !== undefined) {
       throw new Error("--latency-mode applies to Sage triage only. Pass --sage to use it.");
+    }
+    if (opts.claudeFallback === false) {
+      throw new Error("--no-claude-fallback applies to Sage triage only. Pass --sage to use it.");
     }
   }
 
