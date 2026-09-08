@@ -227,10 +227,11 @@ function parseRetryAfterMs(header: string | null): number | undefined {
 
 /**
  * The single source of truth for which Sage failures are worth another
- * round trip. Everything else — 400/401/402/403 and any other non-2xx
- * status — is deterministic, so callers can treat "not retryable" as
- * "permanent for this run". Network and timeout failures are normalized
- * to `LevantoSageServerError`, so they stay retryable.
+ * round trip: 5xx, 429, 408 and 425. Everything else — 400/401/402/403
+ * and any other non-2xx status — is deterministic, so callers can treat
+ * "not retryable" as "permanent for this run". Network and timeout
+ * failures are normalized to `LevantoSageServerError`, so they stay
+ * retryable.
  */
 export function isRetryableSageError(
   err: unknown,
@@ -348,10 +349,12 @@ export class LevantoSageClient {
           throw rateLimitError;
         }
 
-        const isTransient = status >= 500 && status <= 599;
+        // 408 Request Timeout and 425 Too Early are transient by definition, so
+        // they belong with 5xx rather than with the deterministic 4xx statuses.
+        const isTransient = (status >= 500 && status <= 599) || status === 408 || status === 425;
         if (isTransient) {
           const serverError = new LevantoSageServerError(
-            `Levanto Sage server error (HTTP ${status}): ${typeof detail === "string" ? detail : errorText}`,
+            `Levanto Sage transient error (HTTP ${status}): ${typeof detail === "string" ? detail : errorText}`,
             { status, detail },
           );
           if (attempt < maxAttempts) {
@@ -367,9 +370,9 @@ export class LevantoSageClient {
           { status, detail },
         );
       } catch (err) {
-        // Only 5xx, 429 and network/timeout failures are worth another round trip;
-        // every other Sage error (400/401/402/403 and any other non-2xx status) is
-        // deterministic and surfaces immediately.
+        // Only transient failures (5xx, 429, 408, 425) and network/timeout errors
+        // are worth another round trip; every other Sage error (400/401/402/403
+        // and any other non-2xx status) is deterministic and surfaces immediately.
         if (err instanceof LevantoSageError && !isRetryableSageError(err)) {
           throw err;
         }

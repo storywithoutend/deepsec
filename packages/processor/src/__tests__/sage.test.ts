@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  isRetryableSageError,
   LevantoSageAuthError,
   LevantoSageClient,
   LevantoSageError,
@@ -511,6 +512,54 @@ describe("LevantoSageClient", () => {
       );
 
       expect(calls).toBe(3);
+    });
+
+    it.each([408, 425])("retries HTTP %i as a transient failure", async (status) => {
+      let calls = 0;
+      const mockFetch = vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          return new Response("Transient", { status });
+        }
+        return new Response(
+          JSON.stringify({
+            id: "q1",
+            kind: "choice",
+            result: { chosen: "P0", confidence: 0.9, probabilities: [] },
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = new LevantoSageClient({
+        apiKey: "lv_live_key",
+        maxRetries: 2,
+        fetch: mockFetch as unknown as typeof fetch,
+      });
+
+      const result = await client.choice({ content: "test", options: ["P0", "P1"] });
+
+      expect(result.chosen).toBe("P0");
+      expect(calls).toBe(2);
+    });
+
+    it.each([
+      408, 425,
+    ])("throws a retryable LevantoSageServerError once HTTP %i is exhausted", async (status) => {
+      const mockFetch = vi.fn(async () => new Response("Transient", { status }));
+
+      const client = new LevantoSageClient({
+        apiKey: "lv_live_key",
+        maxRetries: 1,
+        fetch: mockFetch as unknown as typeof fetch,
+      });
+
+      // The triage abort predicate is the inverse of isRetryableSageError, so
+      // the class it lands in decides whether a run aborts or falls back.
+      const err = await client.choice({ content: "test", options: ["P0", "P1"] }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(LevantoSageServerError);
+      expect(isRetryableSageError(err)).toBe(true);
     });
 
     it("does not retry a non-transient non-2xx status", async () => {

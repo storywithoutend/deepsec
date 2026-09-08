@@ -843,7 +843,7 @@ describe("Sage Triage", () => {
       expect(loadAllFileRecords(projectId)[0].findings[0].triage).toBeUndefined();
     });
 
-    it("records SAGE_MODEL_NAME so run meta and findings agree on the model", async () => {
+    it("records the model Sage reports it actually ran", async () => {
       writeFinding("src/sage-model.ts", "Sage model finding");
 
       const mockSageClient = {
@@ -863,6 +863,41 @@ describe("Sage Triage", () => {
             },
           ],
           meta: { model: "levanto-sage-v0.9" },
+        })),
+      } as unknown as LevantoSageClient;
+
+      await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        sageClient: mockSageClient,
+      });
+
+      // A server-side model roll needs no client release, so the record must
+      // attribute the verdict (and its confidence) to what actually decided it.
+      expect(loadAllFileRecords(projectId)[0].findings[0].triage?.model).toBe("levanto-sage-v0.9");
+    });
+
+    it("falls back to SAGE_MODEL_NAME when Sage reports no model", async () => {
+      writeFinding("src/no-meta-model.ts", "No meta model finding");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P1", confidence: 0.9, probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: {},
         })),
       } as unknown as LevantoSageClient;
 

@@ -496,6 +496,9 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         requests,
       });
 
+      const sageModel =
+        typeof batchResponse.meta?.model === "string" ? batchResponse.meta.model : SAGE_MODEL_NAME;
+
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         const groupResult = batchResponse.results?.[i];
@@ -570,7 +573,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
             impact,
             reasoning,
             triagedAt: new Date().toISOString(),
-            model: SAGE_MODEL_NAME,
+            model: sageModel,
             ...(hasConfidence ? { confidence } : {}),
           },
         });
