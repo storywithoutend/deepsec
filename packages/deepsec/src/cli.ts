@@ -435,7 +435,19 @@ program
     "Project identifier (default: the only project in deepsec.config.ts; required if there are multiple)",
   )
   .option("--severity <sev>", "Severity to triage (default: MEDIUM)", "MEDIUM")
-  .option("--model <model>", "Model to use (default: claude-sonnet-4-6 — cheaper)")
+  .option(
+    "--provider <provider>",
+    "Triage provider to use (claude or sage; default: sage if key present, else claude)",
+  )
+  .option(
+    "--min-confidence <n>",
+    "Minimum confidence threshold for Sage triage decisions (falls back to Claude if below)",
+    parseFloat,
+  )
+  .option(
+    "--model <model>",
+    "Model to use (default: levanto-sage-v0.8 for sage, claude-sonnet-4-6 for claude)",
+  )
   .option("--force", "Re-triage already-triaged findings")
   .option("--limit <n>", "Max findings to triage", parseInt)
   .option("--concurrency <n>", "Parallel triage batches (default: cores - 1)", parseInt)
