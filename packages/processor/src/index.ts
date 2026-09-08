@@ -82,8 +82,53 @@ export {
   reconcileVerdicts,
   resolveDuplicateRef,
 } from "./reconcile.js";
+export {
+  isRetryableSageError,
+  LevantoSageAuthError,
+  LevantoSageClient,
+  type LevantoSageClientOptions,
+  LevantoSageError,
+  LevantoSageQuotaError,
+  LevantoSageRateLimitError,
+  LevantoSageServerError,
+  LevantoSageValidationError,
+  type SageBatchAnswer,
+  type SageBatchAnswerError,
+  type SageBatchAnswerSuccess,
+  type SageBatchGroupResult,
+  type SageBatchRequest,
+  type SageBatchRequestGroup,
+  type SageBatchResponse,
+  type SageChoiceDecision,
+  type SageChoiceParams,
+  type SageChoiceQuestion,
+  type SageChoiceResult,
+  type SageDecideRequest,
+  type SageDecideResponse,
+  type SageOption,
+  type SageOptionProbability,
+  type SageQuestion,
+  type SageScaleLevel,
+  type SageScaleQuestion,
+  type SageSortQuestion,
+  type SageTagItem,
+  type SageTagsQuestion,
+  type SageYesNoQuestion,
+} from "./sage/index.js";
 export { type RunSetupTaskParams, runSetupTask } from "./setup-agent.js";
-export { triage } from "./triage.js";
+export {
+  CLAUDE_DEFAULT_MODEL,
+  formatFindingForSage,
+  SAGE_EXPLOITABILITY_OPTIONS,
+  SAGE_IMPACT_OPTIONS,
+  SAGE_MODEL_NAME,
+  SAGE_PRIORITY_OPTIONS,
+  type TriageParams,
+  type TriageProgress,
+  type TriageResult,
+  type TriageVerdict,
+  triage,
+} from "./triage.js";
 
 export function createDefaultAgentRegistry(): AgentRegistry {
   const registry = new AgentRegistry();

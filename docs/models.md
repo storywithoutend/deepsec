@@ -1,6 +1,6 @@
 ---
 title: "Models"
-description: "Choose Codex, Claude, or Pi for process and revalidate runs, and compare models under the same workload."
+description: "Choose Codex, Claude, or Pi for process and revalidate runs, choose Claude or Levanto Sage for triage, and compare models under the same workload."
 ---
 
 deepsec talks to LLMs through interchangeable agent backends:
@@ -10,7 +10,8 @@ deepsec talks to LLMs through interchangeable agent backends:
 | `codex` (default)           | `gpt-5.5`             | `process`, `revalidate`      |
 | `claude`                    | `claude-opus-4-8`     | `process`, `revalidate`      |
 | `pi`                        | `zai/glm-5.2`        | `process`, `revalidate` |
-| `claude` (triage)           | `claude-sonnet-4-6`   | `triage` (Claude-only)       |
+| `claude` (triage)           | `claude-sonnet-4-6`   | `triage` (default)           |
+| `sage` (triage)             | `levanto-sage-v0.8`   | `triage --sage`              |
 
 Interactive one-shot setup recommends five benchmark-backed combinations:
 GPT-5.6 Sol, Claude Opus 5, Kimi K3, Grok 4.5, and the current DeepSeek entry.
@@ -76,14 +77,51 @@ pnpm deepsec process --project-id my-app --agent pi
 # Pi with an AI SDK / AI Gateway style model id:
 pnpm deepsec process --project-id my-app --agent pi --model zai/glm-5.2
 
-# Triage uses Claude; pass a cheaper model if you want:
+# Triage on Claude (default); pass a cheaper model if you want:
 pnpm deepsec triage --project-id my-app --model claude-haiku-4-5
+
+# Triage on the Levanto Sage decision model:
+pnpm deepsec triage --project-id my-app --sage
 ```
 
 `--agent`, `--model`, and `--thinking-level` are also accepted on `setup` and
 `revalidate`. Setup persists the interactive choice as `defaultAgent`,
 `defaultModel`, and `defaultThinkingLevel`, checkpoints the exact combination,
 and invalidates affected phases when it changes.
+
+## Triage providers
+
+`triage` buckets findings into P0/P1/P2/skip without re-reading the code,
+and runs on one of two providers:
+
+- `--provider claude` (default) — the Claude Agent SDK on
+  `claude-sonnet-4-6`, or any model you pass with `--model`.
+- `--provider sage` — the [Levanto Sage](https://levanto.ai) decision
+  model, which classifies a finding in ~100ms and returns a calibrated
+  confidence score. `--sage` is the shorthand for
+  `--provider sage --model levanto-sage-v0.8`. Sage exposes exactly one
+  model, so `--model` on this provider accepts no other value.
+
+These flags apply to the sage provider only; the claude provider rejects
+them rather than reporting a setting that does nothing:
+
+| Flag | Effect |
+|---|---|
+| `--latency-mode <quality\|fast>` | Sage speed/quality dial. Default: `quality`. |
+| `--min-confidence <0-1>` | Re-triage any Sage decision below this confidence with Claude. |
+| `--no-claude-fallback` | Never re-triage with Claude; low-confidence, undecided, and failed findings are left untriaged instead. |
+
+Each finding records the model that actually decided it, so a run with a
+confidence floor writes a mix of `levanto-sage-v0.8` and
+`claude-sonnet-4-6`; the confidence Sage reported is persisted on the
+finding (see [data-layout](data-layout.md)). Sage triage needs
+`SAGE_API_KEY` or `LEVANTO_API_KEY` (see
+[configuration](configuration.md)), and that check is not skipped by the
+local-subscription route. If the Claude fallback is enabled but no Claude
+credential is available, deepsec warns and disables the fallback instead
+of failing. A non-retryable Sage error — bad key, exhausted quota, a
+rejected request — aborts the run rather than silently redirecting the
+whole corpus to Claude.
 
 ## Thinking level
 
@@ -173,9 +211,10 @@ repeatable `--ai-header name=value` remain available as Pi runtime overrides.
 
 ### `claude-sonnet-4-6` for `triage`
 
-Triage buckets findings into P0/P1/P2/skip without re-reading the code.
-It just looks at the finding text. That's a cheap task; Opus is
-overkill. Sonnet keeps `triage` at ~1¢/finding.
+Triage just looks at the finding text, never the code. That's a cheap
+task; Opus is overkill. Sonnet keeps `triage` at ~1¢/finding. For a
+faster, confidence-scored alternative, see
+[Triage providers](#triage-providers).
 
 ## Refusals
 
