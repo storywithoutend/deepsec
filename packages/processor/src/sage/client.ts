@@ -304,11 +304,10 @@ export class LevantoSageClient {
           { status, detail },
         );
       } catch (err) {
-        if (
-          err instanceof LevantoSageValidationError ||
-          err instanceof LevantoSageAuthError ||
-          err instanceof LevantoSageQuotaError
-        ) {
+        // Only 5xx/network/timeout failures are worth another round trip; every
+        // other Sage error (400/401/402/403 and any other non-2xx status) is
+        // deterministic and surfaces immediately.
+        if (err instanceof LevantoSageError && !(err instanceof LevantoSageServerError)) {
           throw err;
         }
         if (err instanceof LevantoSageServerError && attempt >= maxAttempts) {

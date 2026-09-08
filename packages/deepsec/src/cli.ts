@@ -435,14 +435,16 @@ program
     "Project identifier (default: the only project in deepsec.config.ts; required if there are multiple)",
   )
   .option("--severity <sev>", "Severity to triage (default: MEDIUM)", "MEDIUM")
-  .option(
-    "--provider <provider>",
-    "Triage provider to use (claude or sage; default: sage if key present, else claude)",
-  )
+  .option("--provider <provider>", "Triage provider to use: claude (default) or sage")
+  .option("--latency-mode <mode>", "Sage latency mode: quality (default) or fast", "quality")
   .option(
     "--min-confidence <n>",
     "Minimum confidence threshold for Sage triage decisions (falls back to Claude if below)",
     parseFloat,
+  )
+  .option(
+    "--no-claude-fallback",
+    "Do not re-triage low-confidence or failed Sage findings with Claude",
   )
   .option(
     "--model <model>",

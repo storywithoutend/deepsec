@@ -378,6 +378,227 @@ describe("Sage Triage", () => {
     });
   });
 
+  describe("malformed Sage responses", () => {
+    function writeSingleFinding(filePath: string, title: string) {
+      writeFileRecord({
+        projectId,
+        filePath,
+        fileHash: `hash-${filePath}`,
+        status: "analyzed",
+        lastScannedAt: new Date().toISOString(),
+        lastScannedRunId: "run1",
+        candidates: [],
+        findings: [
+          {
+            title,
+            severity: "MEDIUM",
+            vulnSlug: "generic",
+            description: "some issue",
+            lineNumbers: [1],
+            confidence: "high",
+            recommendation: "fix it",
+          },
+        ],
+        analysisHistory: [],
+      });
+    }
+
+    function mockClaudeVerdict(title: string) {
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              title,
+              priority: "P1",
+              exploitability: "moderate",
+              impact: "medium",
+              reasoning: "Claude fallback verdict",
+            },
+          ]),
+        } as any;
+      } as any);
+    }
+
+    it("never persists a priority outside P0/P1/P2/skip and falls back instead", async () => {
+      writeSingleFinding("src/odd.ts", "Unrecognized priority finding");
+      mockClaudeVerdict("Unrecognized priority finding");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "p0 ", confidence: 0.99, probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        fallbackToClaude: true,
+        sageClient: mockSageClient,
+      });
+
+      expect(result).toEqual({ triaged: 1, p0: 0, p1: 1, p2: 0, skip: 0 });
+
+      // The record must survive a full reload — an out-of-enum priority would
+      // make salvage drop the finding entirely.
+      const records = loadAllFileRecords(projectId);
+      expect(records[0].findings).toHaveLength(1);
+      expect(records[0].findings[0].triage?.priority).toBe("P1");
+      expect(records[0].findings[0].triage?.model).toBe(CLAUDE_DEFAULT_MODEL);
+    });
+
+    it("treats a missing confidence as below the minConfidence floor", async () => {
+      writeSingleFinding("src/noconf.ts", "Finding without confidence");
+      mockClaudeVerdict("Finding without confidence");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P0", probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        minConfidence: 0.8,
+        fallbackToClaude: true,
+        sageClient: mockSageClient,
+      });
+
+      expect(result).toEqual({ triaged: 1, p0: 0, p1: 1, p2: 0, skip: 0 });
+      const records = loadAllFileRecords(projectId);
+      expect(records[0].findings[0].triage?.model).toBe(CLAUDE_DEFAULT_MODEL);
+    });
+
+    it("counts each finding once when a probability entry is malformed", async () => {
+      writeSingleFinding("src/a.ts", "First finding");
+      writeSingleFinding("src/b.ts", "Second finding");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: {
+                      chosen: "P0",
+                      confidence: 0.97,
+                      probabilities: [{ option: "P0", probability: 0.97 }],
+                    },
+                  },
+                },
+              ],
+            },
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: {
+                      chosen: "P0",
+                      confidence: 0.96,
+                      probabilities: [{ option: "P0" }],
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        fallbackToClaude: true,
+        sageClient: mockSageClient,
+      });
+
+      expect(result).toEqual({ triaged: 2, p0: 2, p1: 0, p2: 0, skip: 0 });
+      expect(vi.mocked(query)).not.toHaveBeenCalled();
+    });
+
+    it("reports low-confidence findings as untriaged when the Claude fallback is off", async () => {
+      writeSingleFinding("src/low.ts", "Low confidence finding");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P2", confidence: 0.3, probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      const progressMessages: string[] = [];
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        minConfidence: 0.8,
+        fallbackToClaude: false,
+        sageClient: mockSageClient,
+        onProgress: (p) => progressMessages.push(p.message),
+      });
+
+      expect(result).toEqual({ triaged: 0, p0: 0, p1: 0, p2: 0, skip: 0 });
+      expect(vi.mocked(query)).not.toHaveBeenCalled();
+      expect(loadAllFileRecords(projectId)[0].findings[0].triage).toBeUndefined();
+      expect(progressMessages.some((m) => m.includes("fell back to Claude"))).toBe(false);
+      expect(progressMessages.some((m) => m.includes("1 left untriaged"))).toBe(true);
+    });
+  });
+
   describe("backwards compatibility with Claude", () => {
     it("runs existing Claude triage when provider is 'claude' or undefined", async () => {
       const finding: Finding = {

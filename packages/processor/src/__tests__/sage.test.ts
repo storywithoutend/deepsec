@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LevantoSageAuthError,
   LevantoSageClient,
+  LevantoSageError,
   LevantoSageQuotaError,
   LevantoSageServerError,
   LevantoSageValidationError,
@@ -404,6 +405,26 @@ describe("LevantoSageClient", () => {
 
       // Initial call + 2 retries = 3 calls
       expect(calls).toBe(3);
+    });
+
+    it("does not retry a non-transient non-2xx status", async () => {
+      let calls = 0;
+      const mockFetch = vi.fn(async () => {
+        calls++;
+        return new Response("Not Found", { status: 404 });
+      });
+
+      const client = new LevantoSageClient({
+        apiKey: "lv_live_key",
+        maxRetries: 2,
+        fetch: mockFetch as unknown as typeof fetch,
+      });
+
+      await expect(client.choice({ content: "test", options: ["P0", "P1"] })).rejects.toThrow(
+        LevantoSageError,
+      );
+
+      expect(calls).toBe(1);
     });
 
     it("succeeds if transient 5xx clears on retry", async () => {

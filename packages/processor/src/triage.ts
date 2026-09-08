@@ -12,7 +12,12 @@ import {
   writeFileRecord,
   writeRunMeta,
 } from "@deepsec/core";
-import { LevantoSageClient, type SageChoiceResult, type SageOption } from "./sage/client.js";
+import {
+  LevantoSageClient,
+  type SageChoiceResult,
+  type SageOption,
+  type SageOptionProbability,
+} from "./sage/client.js";
 
 const TRIAGE_BATCH_SIZE = 30;
 
@@ -97,6 +102,7 @@ export interface TriageParams {
   concurrency?: number;
   model?: string;
   provider?: "claude" | "sage";
+  latencyMode?: "quality" | "fast";
   minConfidence?: number;
   fallbackToClaude?: boolean;
   sageClient?: LevantoSageClient;
@@ -138,6 +144,21 @@ function defaultExploitability(priority: TriagePriority): "trivial" | "moderate"
     default:
       return "difficult";
   }
+}
+
+function isTriagePriority(value: unknown): value is TriagePriority {
+  return value === "P0" || value === "P1" || value === "P2" || value === "skip";
+}
+
+function formatSageProbabilities(probabilities: SageOptionProbability[] | undefined): string {
+  if (!Array.isArray(probabilities)) return "";
+  const parts = probabilities
+    .filter(
+      (p): p is SageOptionProbability =>
+        Boolean(p) && typeof p.option === "string" && Number.isFinite(p.probability),
+    )
+    .map((p) => `${p.option}=${p.probability.toFixed(2)}`);
+  return parts.length > 0 ? ` (${parts.join(", ")})` : "";
 }
 
 function defaultImpact(priority: TriagePriority): "critical" | "high" | "medium" | "low" {
@@ -287,6 +308,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
     severity = "MEDIUM",
     force = false,
     provider = "claude",
+    latencyMode = "quality",
     minConfidence,
     fallbackToClaude = true,
   } = params;
@@ -378,7 +400,14 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
     });
 
     const dirtyRecords = new Set<FileRecord>();
-    const lowConfidenceFallback: typeof toTriage = [];
+    const lowConfidence: typeof toTriage = [];
+    const undecided: typeof toTriage = [];
+
+    let sageTriagedInBatch = 0;
+    let batchP0 = 0;
+    let batchP1 = 0;
+    let batchP2 = 0;
+    let batchSkip = 0;
 
     try {
       const requests = batch.map((item) => ({
@@ -409,19 +438,13 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
       }));
 
       const batchResponse = await sageClient!.decideBatch({
-        latency_mode: "quality",
+        latency_mode: latencyMode,
         requests,
       });
 
-      let sageTriagedInBatch = 0;
-      let batchP0 = 0;
-      let batchP1 = 0;
-      let batchP2 = 0;
-      let batchSkip = 0;
-
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
-        const groupResult = batchResponse.results[i];
+        const groupResult = batchResponse.results?.[i];
 
         const priorityAnswer =
           groupResult?.answers?.find((a) => a.ok && a.result.id === "priority") ??
@@ -433,116 +456,83 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
           groupResult?.answers?.find((a) => a.ok && a.result.id === "impact") ??
           groupResult?.answers?.[2];
 
-        if (priorityAnswer?.ok) {
-          const priorityResult = priorityAnswer.result.result as SageChoiceResult;
-          const chosenPriority = priorityResult.chosen as TriagePriority;
-          const confidence = priorityResult.confidence;
-          const probabilities = priorityResult.probabilities;
-
-          // Check calibrated confidence threshold
-          if (minConfidence !== undefined && confidence < minConfidence) {
-            lowConfidenceFallback.push(item);
-            continue;
-          }
-
-          let exploitability: "trivial" | "moderate" | "difficult" =
-            defaultExploitability(chosenPriority);
-          if (exploitabilityAnswer?.ok) {
-            const expChosen = (exploitabilityAnswer.result.result as SageChoiceResult).chosen;
-            if (expChosen === "trivial" || expChosen === "moderate" || expChosen === "difficult") {
-              exploitability = expChosen;
-            }
-          }
-
-          let impact: "critical" | "high" | "medium" | "low" = defaultImpact(chosenPriority);
-          if (impactAnswer?.ok) {
-            const impChosen = (impactAnswer.result.result as SageChoiceResult).chosen;
-            if (
-              impChosen === "critical" ||
-              impChosen === "high" ||
-              impChosen === "medium" ||
-              impChosen === "low"
-            ) {
-              impact = impChosen;
-            }
-          }
-
-          const probStr = probabilities?.length
-            ? ` (${probabilities.map((p) => `${p.option}=${p.probability.toFixed(2)}`).join(", ")})`
-            : "";
-          const reasoning = `Levanto Sage decision: ${chosenPriority} (confidence: ${(confidence * 100).toFixed(0)}%${probStr})`;
-
-          item.finding.triage = {
-            priority: chosenPriority,
-            exploitability,
-            impact,
-            reasoning,
-            triagedAt: new Date().toISOString(),
-            model: SAGE_MODEL_NAME,
-          };
-
-          totalTriaged++;
-          sageTriagedInBatch++;
-          if (chosenPriority === "P0") {
-            p0++;
-            batchP0++;
-          } else if (chosenPriority === "P1") {
-            p1++;
-            batchP1++;
-          } else if (chosenPriority === "P2") {
-            p2++;
-            batchP2++;
-          } else {
-            skip++;
-            batchSkip++;
-          }
-
-          dirtyRecords.add(item.record);
-        } else {
+        if (!priorityAnswer?.ok) {
           // Priority decision failed — treat as candidate for fallback
-          lowConfidenceFallback.push(item);
+          undecided.push(item);
+          continue;
         }
+
+        const priorityResult = priorityAnswer.result.result as SageChoiceResult | undefined;
+        const chosenPriority = priorityResult?.chosen;
+        const confidence = priorityResult?.confidence;
+
+        // Sage may echo an option Sage-side that is not one of ours; persisting it
+        // would make the record unparseable on the next load, so treat it as undecided.
+        if (!isTriagePriority(chosenPriority)) {
+          undecided.push(item);
+          continue;
+        }
+
+        const hasConfidence = typeof confidence === "number" && Number.isFinite(confidence);
+
+        // Check calibrated confidence threshold. A missing or non-numeric confidence
+        // cannot clear the floor.
+        if (minConfidence !== undefined && !(hasConfidence && confidence >= minConfidence)) {
+          lowConfidence.push(item);
+          continue;
+        }
+
+        let exploitability: "trivial" | "moderate" | "difficult" =
+          defaultExploitability(chosenPriority);
+        if (exploitabilityAnswer?.ok) {
+          const expChosen = (exploitabilityAnswer.result.result as SageChoiceResult | undefined)
+            ?.chosen;
+          if (expChosen === "trivial" || expChosen === "moderate" || expChosen === "difficult") {
+            exploitability = expChosen;
+          }
+        }
+
+        let impact: "critical" | "high" | "medium" | "low" = defaultImpact(chosenPriority);
+        if (impactAnswer?.ok) {
+          const impChosen = (impactAnswer.result.result as SageChoiceResult | undefined)?.chosen;
+          if (
+            impChosen === "critical" ||
+            impChosen === "high" ||
+            impChosen === "medium" ||
+            impChosen === "low"
+          ) {
+            impact = impChosen;
+          }
+        }
+
+        const probStr = formatSageProbabilities(priorityResult?.probabilities);
+        const confidenceStr = hasConfidence ? `${(confidence * 100).toFixed(0)}%` : "unknown";
+        const reasoning = `Levanto Sage decision: ${chosenPriority} (confidence: ${confidenceStr}${probStr})`;
+
+        item.finding.triage = {
+          priority: chosenPriority,
+          exploitability,
+          impact,
+          reasoning,
+          triagedAt: new Date().toISOString(),
+          model: SAGE_MODEL_NAME,
+        };
+
+        sageTriagedInBatch++;
+        if (chosenPriority === "P0") batchP0++;
+        else if (chosenPriority === "P1") batchP1++;
+        else if (chosenPriority === "P2") batchP2++;
+        else batchSkip++;
+
+        dirtyRecords.add(item.record);
       }
 
       for (const record of dirtyRecords) {
         writeFileRecord(record);
       }
-
-      // Handle low-confidence findings falling back to Claude
-      if (lowConfidenceFallback.length > 0 && fallbackToClaude) {
-        emit({
-          type: "batch_started",
-          message: `Batch ${batchIdx + 1}/${batches.length}: falling back ${lowConfidenceFallback.length} finding(s) (confidence < ${minConfidence ?? 1.0}) to Claude...`,
-        });
-
-        try {
-          const claudeResult = await runClaudeTriageBatch(
-            lowConfidenceFallback,
-            CLAUDE_DEFAULT_MODEL,
-            projectInfo,
-          );
-          totalTriaged += claudeResult.triaged;
-          p0 += claudeResult.p0;
-          p1 += claudeResult.p1;
-          p2 += claudeResult.p2;
-          skip += claudeResult.skip;
-          sageTriagedInBatch += claudeResult.triaged;
-        } catch (fallbackErr) {
-          emit({
-            type: "batch_complete",
-            message: `Claude fallback failed for ${lowConfidenceFallback.length} finding(s): ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
-          });
-        }
-      }
-
-      batchesInFlight--;
-      batchesCompleted++;
-      emit({
-        type: "batch_complete",
-        message: `Batch ${batchIdx + 1}/${batches.length}: ${sageTriagedInBatch} triaged (P0:${batchP0} P1:${batchP1} P2:${batchP2} skip:${batchSkip}${lowConfidenceFallback.length > 0 ? `, ${lowConfidenceFallback.length} fell back to Claude` : ""}) (${batchesInFlight} in flight, ${batchesCompleted}/${batches.length} done)`,
-      });
     } catch (err) {
-      // If Sage failed completely, try falling back the whole batch to Claude
+      // Sage failed before any verdict was committed — the whole batch is still
+      // untriaged, so it can be retried in full without double counting.
       if (fallbackToClaude) {
         emit({
           type: "batch_started",
@@ -578,7 +568,64 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         type: "batch_complete",
         message: `Batch ${batchIdx + 1}/${batches.length} failed: ${err instanceof Error ? err.message : String(err)} (${batchesInFlight} in flight, ${batchesCompleted}/${batches.length} done)`,
       });
+      return;
     }
+
+    totalTriaged += sageTriagedInBatch;
+    p0 += batchP0;
+    p1 += batchP1;
+    p2 += batchP2;
+    skip += batchSkip;
+
+    const fallbackItems = [...lowConfidence, ...undecided];
+    let fallbackNote = "";
+
+    if (fallbackItems.length > 0) {
+      const reasons = [
+        lowConfidence.length > 0
+          ? `${lowConfidence.length} below confidence ${minConfidence}`
+          : null,
+        undecided.length > 0 ? `${undecided.length} without a usable Sage decision` : null,
+      ]
+        .filter((r): r is string => r !== null)
+        .join(", ");
+
+      if (fallbackToClaude) {
+        emit({
+          type: "batch_started",
+          message: `Batch ${batchIdx + 1}/${batches.length}: falling back ${fallbackItems.length} finding(s) to Claude (${reasons})...`,
+        });
+
+        try {
+          const claudeResult = await runClaudeTriageBatch(
+            fallbackItems,
+            CLAUDE_DEFAULT_MODEL,
+            projectInfo,
+          );
+          totalTriaged += claudeResult.triaged;
+          p0 += claudeResult.p0;
+          p1 += claudeResult.p1;
+          p2 += claudeResult.p2;
+          skip += claudeResult.skip;
+          fallbackNote = `, ${claudeResult.triaged}/${fallbackItems.length} fell back to Claude`;
+        } catch (fallbackErr) {
+          fallbackNote = `, ${fallbackItems.length} left untriaged (Claude fallback failed)`;
+          emit({
+            type: "batch_complete",
+            message: `Claude fallback failed for ${fallbackItems.length} finding(s): ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
+          });
+        }
+      } else {
+        fallbackNote = `, ${fallbackItems.length} left untriaged (${reasons}; Claude fallback disabled)`;
+      }
+    }
+
+    batchesInFlight--;
+    batchesCompleted++;
+    emit({
+      type: "batch_complete",
+      message: `Batch ${batchIdx + 1}/${batches.length}: ${sageTriagedInBatch} triaged by Sage (P0:${batchP0} P1:${batchP1} P2:${batchP2} skip:${batchSkip})${fallbackNote} (${batchesInFlight} in flight, ${batchesCompleted}/${batches.length} done)`,
+    });
   }
 
   async function triageBatchWithClaude(batch: typeof toTriage, batchIdx: number) {
