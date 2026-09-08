@@ -4,6 +4,7 @@ import {
   LevantoSageClient,
   LevantoSageError,
   LevantoSageQuotaError,
+  LevantoSageRateLimitError,
   LevantoSageServerError,
   LevantoSageValidationError,
 } from "../sage/client.js";
@@ -404,6 +405,61 @@ describe("LevantoSageClient", () => {
       );
 
       // Initial call + 2 retries = 3 calls
+      expect(calls).toBe(3);
+    });
+
+    it("retries HTTP 429 and succeeds when the rate limit clears", async () => {
+      let calls = 0;
+      const mockFetch = vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          return new Response("Too Many Requests", {
+            status: 429,
+            headers: { "retry-after": "0" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            id: "q1",
+            kind: "choice",
+            result: { chosen: "P1", confidence: 0.8, probabilities: [] },
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = new LevantoSageClient({
+        apiKey: "lv_live_key",
+        maxRetries: 2,
+        fetch: mockFetch as unknown as typeof fetch,
+      });
+
+      const result = await client.choice({ content: "test", options: ["P0", "P1"] });
+
+      expect(result.chosen).toBe("P1");
+      expect(calls).toBe(2);
+    });
+
+    it("throws LevantoSageRateLimitError once 429 retries are exhausted", async () => {
+      let calls = 0;
+      const mockFetch = vi.fn(async () => {
+        calls++;
+        return new Response("Too Many Requests", {
+          status: 429,
+          headers: { "retry-after": "0" },
+        });
+      });
+
+      const client = new LevantoSageClient({
+        apiKey: "lv_live_key",
+        maxRetries: 2,
+        fetch: mockFetch as unknown as typeof fetch,
+      });
+
+      await expect(client.choice({ content: "test", options: ["P0", "P1"] })).rejects.toThrow(
+        LevantoSageRateLimitError,
+      );
+
       expect(calls).toBe(3);
     });
 

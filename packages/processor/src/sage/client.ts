@@ -54,6 +54,25 @@ export class LevantoSageServerError extends LevantoSageError {
   }
 }
 
+export class LevantoSageRateLimitError extends LevantoSageError {
+  /** Milliseconds the server asked the caller to wait, when it sent Retry-After. */
+  readonly retryAfterMs?: number;
+
+  constructor(
+    message: string,
+    options?: {
+      status?: number;
+      detail?: unknown;
+      cause?: unknown;
+      retryAfterMs?: number;
+    },
+  ) {
+    super(message, { ...options, code: "RATE_LIMITED", status: options?.status ?? 429 });
+    this.name = "LevantoSageRateLimitError";
+    this.retryAfterMs = options?.retryAfterMs;
+  }
+}
+
 export interface SageOption {
   option: string;
   description?: string;
@@ -192,6 +211,24 @@ export interface SageBatchResponse {
   };
 }
 
+/** Max wait honored from a Retry-After header, so a hostile value cannot stall a run. */
+const MAX_RETRY_AFTER_MS = 30_000;
+
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds)) {
+    return Math.min(Math.max(seconds, 0) * 1000, MAX_RETRY_AFTER_MS);
+  }
+  const at = Date.parse(header);
+  if (Number.isNaN(at)) return undefined;
+  return Math.min(Math.max(at - Date.now(), 0), MAX_RETRY_AFTER_MS);
+}
+
+function isRetryable(err: unknown): err is LevantoSageServerError | LevantoSageRateLimitError {
+  return err instanceof LevantoSageServerError || err instanceof LevantoSageRateLimitError;
+}
+
 export interface LevantoSageClientOptions {
   apiKey?: string;
   baseUrl?: string;
@@ -225,8 +262,11 @@ export class LevantoSageClient {
     return key;
   }
 
-  private async backoff(attempt: number): Promise<void> {
-    const ms = Math.min(1000, 50 * 2 ** (attempt - 1));
+  private async backoff(attempt: number, retryAfterMs?: number): Promise<void> {
+    const ms =
+      retryAfterMs !== undefined && Number.isFinite(retryAfterMs)
+        ? retryAfterMs
+        : Math.min(1000, 50 * 2 ** (attempt - 1));
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
@@ -285,6 +325,20 @@ export class LevantoSageClient {
           );
         }
 
+        if (status === 429) {
+          const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+          const rateLimitError = new LevantoSageRateLimitError(
+            `Levanto Sage rate limited (HTTP 429): ${typeof detail === "string" ? detail : errorText}`,
+            { status, detail, retryAfterMs },
+          );
+          if (attempt < maxAttempts) {
+            lastError = rateLimitError;
+            await this.backoff(attempt, retryAfterMs);
+            continue;
+          }
+          throw rateLimitError;
+        }
+
         const isTransient = status >= 500 && status <= 599;
         if (isTransient) {
           const serverError = new LevantoSageServerError(
@@ -304,19 +358,22 @@ export class LevantoSageClient {
           { status, detail },
         );
       } catch (err) {
-        // Only 5xx/network/timeout failures are worth another round trip; every
-        // other Sage error (400/401/402/403 and any other non-2xx status) is
+        // Only 5xx, 429 and network/timeout failures are worth another round trip;
+        // every other Sage error (400/401/402/403 and any other non-2xx status) is
         // deterministic and surfaces immediately.
-        if (err instanceof LevantoSageError && !(err instanceof LevantoSageServerError)) {
+        if (err instanceof LevantoSageError && !isRetryable(err)) {
           throw err;
         }
-        if (err instanceof LevantoSageServerError && attempt >= maxAttempts) {
+        if (isRetryable(err) && attempt >= maxAttempts) {
           throw err;
         }
 
         lastError = err instanceof Error ? err : new Error(String(err));
         if (attempt < maxAttempts) {
-          await this.backoff(attempt);
+          await this.backoff(
+            attempt,
+            err instanceof LevantoSageRateLimitError ? err.retryAfterMs : undefined,
+          );
           continue;
         }
 

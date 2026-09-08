@@ -17,6 +17,7 @@ export async function triageCommand(opts: {
   concurrency?: number;
   model?: string;
   provider?: string;
+  sage?: boolean;
   latencyMode?: string;
   minConfidence?: number;
   claudeFallback?: boolean;
@@ -28,14 +29,32 @@ export async function triageCommand(opts: {
   if (opts.provider && opts.provider !== "claude" && opts.provider !== "sage") {
     throw new Error(`Invalid triage provider "${opts.provider}". Expected "claude" or "sage".`);
   }
-  const provider: "claude" | "sage" = opts.provider === "sage" ? "sage" : "claude";
+  // `--sage` is the shorthand: it selects the provider and its only model,
+  // overriding whatever --provider/--model said.
+  const provider: "claude" | "sage" = opts.sage || opts.provider === "sage" ? "sage" : "claude";
 
   if (opts.latencyMode && opts.latencyMode !== "quality" && opts.latencyMode !== "fast") {
     throw new Error(`Invalid latency mode "${opts.latencyMode}". Expected "quality" or "fast".`);
   }
   const latencyMode: "quality" | "fast" = opts.latencyMode === "fast" ? "fast" : "quality";
 
-  const model = opts.model ?? (provider === "sage" ? SAGE_MODEL_NAME : CLAUDE_DEFAULT_MODEL);
+  if (opts.minConfidence !== undefined) {
+    if (!Number.isFinite(opts.minConfidence) || opts.minConfidence < 0 || opts.minConfidence > 1) {
+      throw new Error(
+        `Invalid --min-confidence "${opts.minConfidence}". Expected a number between 0 and 1.`,
+      );
+    }
+  }
+
+  // Sage exposes exactly one model and the batch request carries no model field,
+  // so an unhonorable --model would make run meta disagree with every record it writes.
+  if (provider === "sage" && !opts.sage && opts.model && opts.model !== SAGE_MODEL_NAME) {
+    throw new Error(
+      `Model "${opts.model}" is not available for the sage provider. Expected "${SAGE_MODEL_NAME}".`,
+    );
+  }
+
+  const model = provider === "sage" ? SAGE_MODEL_NAME : (opts.model ?? CLAUDE_DEFAULT_MODEL);
 
   let fallbackToClaude = opts.claudeFallback !== false;
 

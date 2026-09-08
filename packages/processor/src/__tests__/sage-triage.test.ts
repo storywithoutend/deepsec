@@ -599,6 +599,143 @@ describe("Sage Triage", () => {
     });
   });
 
+  describe("Claude verdict validation", () => {
+    function writeFinding(filePath: string, title: string) {
+      writeFileRecord({
+        projectId,
+        filePath,
+        fileHash: `hash-${filePath}`,
+        status: "analyzed",
+        lastScannedAt: new Date().toISOString(),
+        lastScannedRunId: "run1",
+        candidates: [],
+        findings: [
+          {
+            title,
+            severity: "MEDIUM",
+            vulnSlug: "generic",
+            description: "some issue",
+            lineNumbers: [1],
+            confidence: "high",
+            recommendation: "fix it",
+          },
+        ],
+        analysisHistory: [],
+      });
+    }
+
+    it("never persists a Claude priority outside the schema enum", async () => {
+      writeFinding("src/claude-bad.ts", "Bad priority finding");
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              title: "Bad priority finding",
+              priority: "P3",
+              exploitability: "moderate",
+              impact: "medium",
+              reasoning: "out of range priority",
+            },
+          ]),
+        } as any;
+      } as any);
+
+      const result = await triage({ projectId, severity: "MEDIUM", provider: "claude" });
+
+      expect(result).toEqual({ triaged: 0, p0: 0, p1: 0, p2: 0, skip: 0 });
+
+      // The record must still round-trip: an out-of-enum triage block would make
+      // salvage drop the whole finding on reload.
+      const records = loadAllFileRecords(projectId);
+      expect(records).toHaveLength(1);
+      expect(records[0].findings).toHaveLength(1);
+      expect(records[0].findings[0].triage).toBeUndefined();
+    });
+
+    it("normalizes out-of-enum exploitability/impact and a missing reasoning", async () => {
+      writeFinding("src/claude-partial.ts", "Partial verdict finding");
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              title: "Partial verdict finding",
+              priority: "P1",
+              exploitability: "very-easy",
+              impact: 3,
+            },
+          ]),
+        } as any;
+      } as any);
+
+      const result = await triage({ projectId, severity: "MEDIUM", provider: "claude" });
+
+      expect(result).toEqual({ triaged: 1, p0: 0, p1: 1, p2: 0, skip: 0 });
+
+      const records = loadAllFileRecords(projectId);
+      expect(records[0].findings).toHaveLength(1);
+      expect(records[0].findings[0].triage?.priority).toBe("P1");
+      expect(records[0].findings[0].triage?.exploitability).toBe("moderate");
+      expect(records[0].findings[0].triage?.impact).toBe("high");
+      expect(records[0].findings[0].triage?.reasoning).toBe("");
+    });
+
+    it("survives a Claude response that is valid JSON but not an array", async () => {
+      writeFinding("src/claude-obj.ts", "Object response finding");
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify({ error: "could not classify" }),
+        } as any;
+      } as any);
+
+      const result = await triage({ projectId, severity: "MEDIUM", provider: "claude" });
+
+      expect(result).toEqual({ triaged: 0, p0: 0, p1: 0, p2: 0, skip: 0 });
+      expect(loadAllFileRecords(projectId)[0].findings[0].triage).toBeUndefined();
+    });
+
+    it("records the model Sage reports it actually ran", async () => {
+      writeFinding("src/sage-model.ts", "Sage model finding");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P1", confidence: 0.9, probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: "levanto-sage-v0.9" },
+        })),
+      } as unknown as LevantoSageClient;
+
+      await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        sageClient: mockSageClient,
+      });
+
+      expect(loadAllFileRecords(projectId)[0].findings[0].triage?.model).toBe("levanto-sage-v0.9");
+    });
+  });
+
   describe("backwards compatibility with Claude", () => {
     it("runs existing Claude triage when provider is 'claude' or undefined", async () => {
       const finding: Finding = {

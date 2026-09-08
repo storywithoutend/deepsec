@@ -150,6 +150,14 @@ function isTriagePriority(value: unknown): value is TriagePriority {
   return value === "P0" || value === "P1" || value === "P2" || value === "skip";
 }
 
+function isExploitability(value: unknown): value is "trivial" | "moderate" | "difficult" {
+  return value === "trivial" || value === "moderate" || value === "difficult";
+}
+
+function isImpact(value: unknown): value is "critical" | "high" | "medium" | "low" {
+  return value === "critical" || value === "high" || value === "medium" || value === "low";
+}
+
 function formatSageProbabilities(probabilities: SageOptionProbability[] | undefined): string {
   if (!Array.isArray(probabilities)) return "";
   const parts = probabilities
@@ -264,10 +272,11 @@ ${findingsList}
 
   const jsonMatch = resultText.match(/```json\s*([\s\S]*?)```/);
   const jsonStr = jsonMatch ? jsonMatch[1].trim() : resultText.trim();
-  let verdicts: TriageVerdict[] = [];
+  let parsed: unknown;
   try {
-    verdicts = JSON.parse(jsonStr);
+    parsed = JSON.parse(jsonStr);
   } catch {}
+  const verdicts: TriageVerdict[] = Array.isArray(parsed) ? (parsed as TriageVerdict[]) : [];
 
   let p0 = 0;
   let p1 = 0;
@@ -276,21 +285,26 @@ ${findingsList}
   let triaged = 0;
 
   for (const verdict of verdicts) {
+    const priority = verdict?.priority;
+    if (!isTriagePriority(priority)) continue;
+
     const item = batch.find((b) => b.finding.title === verdict.title);
     if (!item) continue;
 
     item.finding.triage = {
-      priority: verdict.priority,
-      exploitability: verdict.exploitability,
-      impact: verdict.impact,
-      reasoning: verdict.reasoning,
+      priority,
+      exploitability: isExploitability(verdict.exploitability)
+        ? verdict.exploitability
+        : defaultExploitability(priority),
+      impact: isImpact(verdict.impact) ? verdict.impact : defaultImpact(priority),
+      reasoning: typeof verdict.reasoning === "string" ? verdict.reasoning : "",
       triagedAt: new Date().toISOString(),
       model,
     };
     triaged++;
-    if (verdict.priority === "P0") p0++;
-    else if (verdict.priority === "P1") p1++;
-    else if (verdict.priority === "P2") p2++;
+    if (priority === "P0") p0++;
+    else if (priority === "P1") p1++;
+    else if (priority === "P2") p2++;
     else skip++;
   }
 
@@ -442,6 +456,9 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         requests,
       });
 
+      const sageModel =
+        typeof batchResponse.meta?.model === "string" ? batchResponse.meta.model : SAGE_MODEL_NAME;
+
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         const groupResult = batchResponse.results?.[i];
@@ -487,7 +504,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         if (exploitabilityAnswer?.ok) {
           const expChosen = (exploitabilityAnswer.result.result as SageChoiceResult | undefined)
             ?.chosen;
-          if (expChosen === "trivial" || expChosen === "moderate" || expChosen === "difficult") {
+          if (isExploitability(expChosen)) {
             exploitability = expChosen;
           }
         }
@@ -495,12 +512,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         let impact: "critical" | "high" | "medium" | "low" = defaultImpact(chosenPriority);
         if (impactAnswer?.ok) {
           const impChosen = (impactAnswer.result.result as SageChoiceResult | undefined)?.chosen;
-          if (
-            impChosen === "critical" ||
-            impChosen === "high" ||
-            impChosen === "medium" ||
-            impChosen === "low"
-          ) {
+          if (isImpact(impChosen)) {
             impact = impChosen;
           }
         }
@@ -515,7 +527,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
           impact,
           reasoning,
           triagedAt: new Date().toISOString(),
-          model: SAGE_MODEL_NAME,
+          model: sageModel,
         };
 
         sageTriagedInBatch++;

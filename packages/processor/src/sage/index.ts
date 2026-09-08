@@ -4,6 +4,7 @@ export {
   type LevantoSageClientOptions,
   LevantoSageError,
   LevantoSageQuotaError,
+  LevantoSageRateLimitError,
   LevantoSageServerError,
   LevantoSageValidationError,
   type SageBatchAnswer,
