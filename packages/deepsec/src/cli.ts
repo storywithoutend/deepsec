@@ -348,6 +348,15 @@ program
     "--comment-out <path>",
     "Write a PR-comment-shaped markdown summary to <path> (only when findings exist)",
   )
+  .option(
+    "--sage-gate",
+    "Filter obvious benign scanner candidates using Levanto Sage before agent runs",
+  )
+  .option(
+    "--sage-gate-confidence <n>",
+    "Confidence threshold for Sage candidate gate (default: 0.85)",
+    parseFloat,
+  )
   .action(processCommand);
 
 program

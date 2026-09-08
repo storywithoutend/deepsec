@@ -41,6 +41,7 @@ pnpm deepsec ...    # the CLI (runs via tsx)
   there; use `data/<projectId>/INFO.md` or `config.json:promptAppend`.
 - Triage supports Claude Sonnet and Levanto Sage (`--provider <claude|sage>`).
   Levanto Sage client lives in `packages/processor/src/sage/client.ts` with zero dependencies.
+- Candidate gate in `packages/processor/src/gate.ts` filters benign regex candidates via Levanto Sage (`--sage-gate`).
 
 ## Maintaining this file
 

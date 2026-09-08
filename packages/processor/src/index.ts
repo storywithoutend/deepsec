@@ -33,6 +33,7 @@ import type {
 } from "./agents/types.js";
 import { batchCandidates } from "./batch.js";
 import { enrichFileRecord } from "./enrich.js";
+import { filterCandidatesWithSage } from "./gate.js";
 import { assemblePrompt } from "./prompt/assemble.js";
 import { languagesForBatch } from "./prompt/file-language.js";
 import {
@@ -42,6 +43,7 @@ import {
   reconcileVerdicts,
   resolveDuplicateRef,
 } from "./reconcile.js";
+import { LevantoSageClient } from "./sage/client.js";
 
 export { ClaudeAgentSdkPlugin } from "./agents/claude-agent-sdk.js";
 export { CodexAgentSdkPlugin } from "./agents/codex-sdk.js";
@@ -117,6 +119,18 @@ export {
 } from "./sage/index.js";
 export { type RunSetupTaskParams, runSetupTask } from "./setup-agent.js";
 export {
+  buildCandidateGateContent,
+  type CandidateGateDecision,
+  DEFAULT_SAGE_GATE_CONFIDENCE,
+  extractSurroundingLines,
+  type FilterCandidatesParams,
+  type FilterCandidatesResult,
+  filterCandidatesWithSage,
+  getRuleDescription,
+  parseYesNoResult,
+  SAGE_GATE_QUESTION_INSTRUCTIONS,
+} from "./gate.js";
+export {
   CLAUDE_DEFAULT_MODEL,
   formatFindingForSage,
   SAGE_EXPLOITABILITY_OPTIONS,
@@ -144,7 +158,7 @@ export function createDefaultAgentRegistry(): AgentRegistry {
 }
 
 export interface ProcessProgress {
-  type: "batch_started" | "batch_complete" | "agent_progress" | "all_complete";
+  type: "batch_started" | "batch_complete" | "agent_progress" | "all_complete" | "sage_gate";
   message: string;
   batchIndex?: number;
   totalBatches?: number;
@@ -198,6 +212,12 @@ export async function process(params: {
   onProgress?: (progress: ProcessProgress) => void;
   /** Stop claiming new batches once completed batch cost reaches this limit. */
   maxCostUsd?: number;
+  /** Filter candidates using Levanto Sage before agent investigation */
+  sageGate?: boolean;
+  /** Confidence threshold for Sage candidate gate (default: 0.85) */
+  sageGateConfidence?: number;
+  /** Optional custom Sage client instance */
+  sageClient?: LevantoSageClient;
 }): Promise<{
   runId: string;
   analysisCount: number;
@@ -220,6 +240,7 @@ export async function process(params: {
   quotaExhausted?: { source: QuotaSource; rawMessage: string };
   totalCostUsd?: number;
   costLimitReached?: { limitUsd: number; actualUsd: number };
+  candidatesFilteredBySage?: number;
 }> {
   const { projectId, agentType = "claude-agent-sdk", config = {}, reinvestigate = false } = params;
   // We deliberately don't default `promptTemplate` to DEFAULT_PROMPT_TEMPLATE
@@ -620,6 +641,21 @@ export async function process(params: {
       return { runId, analysisCount: 0, findingCount: 0, errorBatchCount: 0 };
     }
 
+    let candidatesFilteredBySage: number | undefined;
+    if (params.sageGate) {
+      const gateResult = await filterCandidatesWithSage({
+        records: toProcess,
+        rootPath: effectiveRootPath,
+        threshold: params.sageGateConfidence,
+        sageClient: params.sageClient,
+      });
+      candidatesFilteredBySage = gateResult.filteredCount;
+      emitProgress({
+        type: "sage_gate",
+        message: `Sage candidate gate: filtered ${candidatesFilteredBySage} candidate(s) (${gateResult.retainedCount} remaining across ${toProcess.length} file(s))`,
+      });
+    }
+
     const batches = batchCandidates(toProcess, params.batchSize);
     let totalAnalyses = 0;
     let totalFindings = 0;
@@ -882,6 +918,7 @@ export async function process(params: {
       totalInputTokens,
       totalOutputTokens,
       totalDurationMs,
+      candidatesFilteredBySage,
     });
 
     emitProgress({
@@ -899,6 +936,7 @@ export async function process(params: {
       quotaExhausted,
       totalCostUsd,
       costLimitReached,
+      candidatesFilteredBySage,
     };
   } catch (err) {
     // Body threw before completing. Flip phase to "error" so the

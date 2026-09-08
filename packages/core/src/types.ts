@@ -74,6 +74,7 @@ export interface RunMeta {
     fixed?: number;
     uncertain?: number;
     duplicates?: number;
+    candidatesFilteredBySage?: number;
   };
 }
 

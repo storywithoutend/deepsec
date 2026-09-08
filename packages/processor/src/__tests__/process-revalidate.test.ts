@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { defineConfig, type FileRecord, setLoadedConfig } from "@deepsec/core";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { defineConfig, type FileRecord, readRunMeta, setLoadedConfig } from "@deepsec/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QuotaExhaustedError } from "../agents/shared.js";
 import { process as processProject, revalidate } from "../index.js";
 import { StubAgent } from "./stub-agent.js";
@@ -211,6 +211,68 @@ describe("processor with stub agent", () => {
         concurrency: 1,
       }),
     ).rejects.toThrow(/Project root does not exist/);
+  });
+
+  it("process() filters candidates with Sage gate when sageGate: true and records candidatesFilteredBySage", async () => {
+    const fx = setupProject({ files: ["app.ts"] });
+    const rec = pendingRecord(fx.projectId, "app.ts");
+    rec.candidates = [
+      {
+        vulnSlug: "sql-injection",
+        lineNumbers: [1],
+        snippet: "SELECT 1",
+        matchedPattern: "SELECT",
+      },
+      {
+        vulnSlug: "rce",
+        lineNumbers: [2],
+        snippet: "exec(userInput)",
+        matchedPattern: "exec",
+      },
+    ];
+    fx.writeRecord(rec);
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+
+    const mockSageClient = {
+      decideBatch: vi.fn(async (req: any) => ({
+        results: req.requests.map((r: any) => ({
+          answers: [
+            {
+              ok: true,
+              result: {
+                id: "plausible_vulnerability",
+                kind: "yesno",
+                result: r.content.includes("userInput")
+                  ? { answer: "yes", confidence: 0.95 }
+                  : { answer: "no", confidence: 0.92 },
+              },
+            },
+          ],
+        })),
+      })),
+    };
+
+    const result = await processProject({
+      projectId: fx.projectId,
+      agentType: "stub",
+      sageGate: true,
+      sageClient: mockSageClient as any,
+    });
+
+    expect(result.candidatesFilteredBySage).toBe(1);
+    const updatedRec = fx.readRecord("app.ts");
+    expect(updatedRec.candidates).toHaveLength(1);
+    expect(updatedRec.candidates[0].vulnSlug).toBe("rce");
+
+    const meta = readRunMeta(fx.projectId, result.runId);
+    expect(meta.stats.candidatesFilteredBySage).toBe(1);
   });
 
   it("process() does NOT reclaim a record locked by a still-running other run", async () => {
