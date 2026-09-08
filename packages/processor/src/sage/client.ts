@@ -245,7 +245,7 @@ export class LevantoSageClient {
   private readonly fetchFn: typeof fetch;
 
   constructor(options?: LevantoSageClientOptions) {
-    this.apiKey = options?.apiKey ?? process.env.SAGE_API_KEY ?? process.env.LEVANTO_API_KEY;
+    this.apiKey = options?.apiKey || process.env.SAGE_API_KEY || process.env.LEVANTO_API_KEY;
     this.baseUrl = (options?.baseUrl ?? "https://sage.levanto.ai").replace(/\/+$/, "");
     this.timeoutMs = options?.timeoutMs ?? 30000;
     this.maxRetries = options?.maxRetries ?? 2;
@@ -253,7 +253,7 @@ export class LevantoSageClient {
   }
 
   private resolveApiKey(): string {
-    const key = this.apiKey ?? process.env.SAGE_API_KEY ?? process.env.LEVANTO_API_KEY;
+    const key = this.apiKey || process.env.SAGE_API_KEY || process.env.LEVANTO_API_KEY;
     if (!key) {
       throw new LevantoSageAuthError(
         "Missing Levanto Sage API key. Set SAGE_API_KEY or LEVANTO_API_KEY in the environment or pass apiKey in options.",

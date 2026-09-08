@@ -67,6 +67,26 @@ describe("triageCommand option resolution", () => {
     expect(vi.mocked(triage)).not.toHaveBeenCalled();
   });
 
+  it("rejects --min-confidence when the sage provider was not selected", async () => {
+    // The Claude path never reads it, so accepting it would echo an inert setting.
+    await expect(triageCommand({ minConfidence: 0.9 })).rejects.toThrow(/Sage triage only/);
+    expect(vi.mocked(triage)).not.toHaveBeenCalled();
+  });
+
+  it("rejects --latency-mode when the sage provider was not selected", async () => {
+    await expect(triageCommand({ latencyMode: "fast" })).rejects.toThrow(/Sage triage only/);
+    expect(vi.mocked(triage)).not.toHaveBeenCalled();
+  });
+
+  it("accepts the Sage-only flags under --sage", async () => {
+    await triageCommand({ sage: true, minConfidence: 0.9, latencyMode: "fast" });
+
+    const args = vi.mocked(triage).mock.calls[0][0];
+    expect(args.provider).toBe("sage");
+    expect(args.minConfidence).toBe(0.9);
+    expect(args.latencyMode).toBe("fast");
+  });
+
   it("still honors --model for the claude provider", async () => {
     await triageCommand({ provider: "claude", model: "claude-opus-4-1" });
 

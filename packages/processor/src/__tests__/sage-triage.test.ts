@@ -702,7 +702,7 @@ describe("Sage Triage", () => {
       expect(loadAllFileRecords(projectId)[0].findings[0].triage).toBeUndefined();
     });
 
-    it("records the model Sage reports it actually ran", async () => {
+    it("records SAGE_MODEL_NAME so run meta and findings agree on the model", async () => {
       writeFinding("src/sage-model.ts", "Sage model finding");
 
       const mockSageClient = {
@@ -732,7 +732,90 @@ describe("Sage Triage", () => {
         sageClient: mockSageClient,
       });
 
-      expect(loadAllFileRecords(projectId)[0].findings[0].triage?.model).toBe("levanto-sage-v0.9");
+      expect(loadAllFileRecords(projectId)[0].findings[0].triage?.model).toBe(SAGE_MODEL_NAME);
+    });
+
+    it("binds same-title verdicts across files to distinct findings", async () => {
+      writeFinding("src/a.ts", "Hardcoded API key in config");
+      writeFinding("src/b.ts", "Hardcoded API key in config");
+
+      const records = loadAllFileRecords(projectId);
+      const idA = records.find((r) => r.filePath === "src/a.ts")?.findings[0].findingId;
+      const idB = records.find((r) => r.filePath === "src/b.ts")?.findings[0].findingId;
+      expect(idA).toBeDefined();
+      expect(idB).toBeDefined();
+      expect(idA).not.toBe(idB);
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              id: idA,
+              title: "Hardcoded API key in config",
+              priority: "P0",
+              exploitability: "trivial",
+              impact: "critical",
+              reasoning: "live key in a.ts",
+            },
+            {
+              id: idB,
+              title: "Hardcoded API key in config",
+              priority: "skip",
+              exploitability: "difficult",
+              impact: "low",
+              reasoning: "placeholder in b.ts",
+            },
+          ]),
+        } as any;
+      } as any);
+
+      const result = await triage({ projectId, severity: "MEDIUM", provider: "claude" });
+
+      expect(result).toEqual({ triaged: 2, p0: 1, p1: 0, p2: 0, skip: 1 });
+
+      const after = loadAllFileRecords(projectId);
+      const recA = after.find((r) => r.filePath === "src/a.ts");
+      const recB = after.find((r) => r.filePath === "src/b.ts");
+      expect(recA?.findings[0].triage?.priority).toBe("P0");
+      expect(recB?.findings[0].triage?.priority).toBe("skip");
+    });
+
+    it("falls back to title binding without reusing an already-bound finding", async () => {
+      writeFinding("src/c.ts", "Missing CSRF token");
+      writeFinding("src/d.ts", "Missing CSRF token");
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              title: "Missing CSRF token",
+              priority: "P1",
+              exploitability: "moderate",
+              impact: "high",
+              reasoning: "first",
+            },
+            {
+              title: "Missing CSRF token",
+              priority: "P2",
+              exploitability: "difficult",
+              impact: "medium",
+              reasoning: "second",
+            },
+          ]),
+        } as any;
+      } as any);
+
+      const result = await triage({ projectId, severity: "MEDIUM", provider: "claude" });
+
+      expect(result).toEqual({ triaged: 2, p0: 0, p1: 1, p2: 1, skip: 0 });
+
+      const after = loadAllFileRecords(projectId);
+      const priorities = after.map((r) => r.findings[0].triage?.priority).sort();
+      expect(priorities).toEqual(["P1", "P2"]);
     });
   });
 

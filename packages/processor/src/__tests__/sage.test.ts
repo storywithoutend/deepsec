@@ -408,6 +408,56 @@ describe("LevantoSageClient", () => {
       expect(calls).toBe(3);
     });
 
+    it("falls through a blank SAGE_API_KEY to LEVANTO_API_KEY", async () => {
+      process.env.SAGE_API_KEY = "";
+      process.env.LEVANTO_API_KEY = "lv_live_from_levanto";
+
+      const seen: string[] = [];
+      const mockFetch = vi.fn(async (_url: string, init: RequestInit) => {
+        seen.push((init.headers as Record<string, string>).Authorization);
+        return new Response(
+          JSON.stringify({
+            id: "q1",
+            kind: "choice",
+            result: { chosen: "P0", confidence: 0.9, probabilities: [] },
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = new LevantoSageClient({ fetch: mockFetch as unknown as typeof fetch });
+      const result = await client.choice({ content: "test", options: ["P0", "P1"] });
+
+      expect(result.chosen).toBe("P0");
+      expect(seen).toEqual(["Bearer lv_live_from_levanto"]);
+    });
+
+    it("treats a blank apiKey option as unset rather than as a credential", async () => {
+      process.env.SAGE_API_KEY = "lv_live_from_env";
+
+      const mockFetch = vi.fn(async (_url: string, init: RequestInit) => {
+        expect((init.headers as Record<string, string>).Authorization).toBe(
+          "Bearer lv_live_from_env",
+        );
+        return new Response(
+          JSON.stringify({
+            id: "q1",
+            kind: "choice",
+            result: { chosen: "P0", confidence: 0.9, probabilities: [] },
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = new LevantoSageClient({
+        apiKey: "",
+        fetch: mockFetch as unknown as typeof fetch,
+      });
+
+      await expect(client.choice({ content: "test", options: ["P0", "P1"] })).resolves.toBeTruthy();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
     it("retries HTTP 429 and succeeds when the rate limit clears", async () => {
       let calls = 0;
       const mockFetch = vi.fn(async () => {

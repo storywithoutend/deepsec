@@ -82,6 +82,7 @@ export const SAGE_IMPACT_OPTIONS: SageOption[] = [
 ];
 
 export interface TriageVerdict {
+  id?: string;
   title: string;
   priority: TriagePriority;
   exploitability: "trivial" | "moderate" | "difficult";
@@ -198,9 +199,13 @@ async function runClaudeTriageBatch(
     return { verdicts: [], p0: 0, p1: 0, p2: 0, skip: 0, triaged: 0 };
   }
 
+  const refFor = (item: { record: FileRecord; finding: Finding }, idx: number) =>
+    item.finding.findingId ?? `${idx + 1}`;
+
   const findingsList = batch
     .map((item, idx) => {
       return `### ${idx + 1}. ${item.finding.title}
+- **ID:** \`${refFor(item, idx)}\`
 - **File:** \`${item.record.filePath}\`
 - **Severity:** ${item.finding.severity}
 - **Slug:** ${item.finding.vulnSlug}
@@ -244,6 +249,7 @@ ${findingsList}
 \`\`\`json
 [
   {
+    "id": "exact ID of the finding above",
     "title": "exact title",
     "priority": "P0" | "P1" | "P2" | "skip",
     "exploitability": "trivial" | "moderate" | "difficult",
@@ -284,12 +290,28 @@ ${findingsList}
   let skip = 0;
   let triaged = 0;
 
+  const unmatched = new Map(batch.map((item, idx) => [refFor(item, idx), item]));
+
   for (const verdict of verdicts) {
     const priority = verdict?.priority;
     if (!isTriagePriority(priority)) continue;
 
-    const item = batch.find((b) => b.finding.title === verdict.title);
-    if (!item) continue;
+    // Titles are only unique within a file, but a batch spans many files, so a
+    // title-only match can bind two verdicts to the same finding.
+    let ref = typeof verdict.id === "string" ? verdict.id : undefined;
+    if (ref === undefined || !unmatched.has(ref)) {
+      ref = undefined;
+      for (const [candidateRef, candidate] of unmatched) {
+        if (candidate.finding.title === verdict.title) {
+          ref = candidateRef;
+          break;
+        }
+      }
+    }
+    if (ref === undefined) continue;
+
+    const item = unmatched.get(ref)!;
+    unmatched.delete(ref);
 
     item.finding.triage = {
       priority,
@@ -456,9 +478,6 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         requests,
       });
 
-      const sageModel =
-        typeof batchResponse.meta?.model === "string" ? batchResponse.meta.model : SAGE_MODEL_NAME;
-
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         const groupResult = batchResponse.results?.[i];
@@ -527,7 +546,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
           impact,
           reasoning,
           triagedAt: new Date().toISOString(),
-          model: sageModel,
+          model: SAGE_MODEL_NAME,
         };
 
         sageTriagedInBatch++;

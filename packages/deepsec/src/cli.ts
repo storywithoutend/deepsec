@@ -437,7 +437,7 @@ program
   .option("--severity <sev>", "Severity to triage (default: MEDIUM)", "MEDIUM")
   .option("--provider <provider>", "Triage provider to use: claude (default) or sage")
   .option("--sage", "Shorthand for --provider sage --model levanto-sage-v0.8")
-  .option("--latency-mode <mode>", "Sage latency mode: quality (default) or fast", "quality")
+  .option("--latency-mode <mode>", "Sage latency mode: quality (default) or fast")
   .option(
     "--min-confidence <n>",
     "Minimum confidence threshold for Sage triage decisions (falls back to Claude if below)",
