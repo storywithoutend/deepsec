@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Finding } from "@deepsec/core";
-import { ensureProject, loadAllFileRecords, writeFileRecord } from "@deepsec/core";
+import { ensureProject, listRuns, loadAllFileRecords, writeFileRecord } from "@deepsec/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LevantoSageClient, SageBatchResponse } from "../sage/client.js";
 import { CLAUDE_DEFAULT_MODEL, formatFindingForSage, SAGE_MODEL_NAME, triage } from "../triage.js";
@@ -557,6 +557,116 @@ describe("Sage Triage", () => {
       expect(vi.mocked(query)).not.toHaveBeenCalled();
     });
 
+    it("degrades a single malformed answer to fallback without aborting the batch", async () => {
+      writeSingleFinding("src/ok.ts", "Well formed finding");
+      writeSingleFinding("src/broken.ts", "Malformed answer finding");
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              title: "Well formed finding",
+              priority: "P1",
+              exploitability: "moderate",
+              impact: "medium",
+              reasoning: "Claude fallback verdict",
+            },
+            {
+              title: "Malformed answer finding",
+              priority: "P1",
+              exploitability: "moderate",
+              impact: "medium",
+              reasoning: "Claude fallback verdict",
+            },
+          ]),
+        } as any;
+      } as any);
+
+      // The second group carries an `ok: true` answer with no `result` payload.
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P0", confidence: 0.95, probabilities: [] },
+                  },
+                },
+              ],
+            },
+            { answers: [{ ok: true }] },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        fallbackToClaude: true,
+        sageClient: mockSageClient,
+      });
+
+      // Every finding is counted exactly once: Sage handled one, Claude the other.
+      expect(result).toEqual({ triaged: 2, p0: 1, p1: 1, p2: 0, skip: 0 });
+
+      const triages = loadAllFileRecords(projectId).map((r) => r.findings[0].triage);
+      expect(triages.filter((t) => t?.model === SAGE_MODEL_NAME)).toHaveLength(1);
+      expect(triages.filter((t) => t?.model === CLAUDE_DEFAULT_MODEL)).toHaveLength(1);
+      expect(triages.map((t) => t?.priority).sort()).toEqual(["P0", "P1"]);
+    });
+
+    it("leaves no orphaned Sage verdicts on disk when the batch aborts mid-decode", async () => {
+      writeSingleFinding("src/first.ts", "First finding");
+      writeSingleFinding("src/second.ts", "Second finding");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P0", confidence: 0.95, probabilities: [] },
+                  },
+                },
+              ],
+            },
+            {
+              // A getter that throws mid-loop, after finding 1 has been decoded.
+              get answers(): unknown[] {
+                throw new TypeError("malformed group");
+              },
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        fallbackToClaude: false,
+        sageClient: mockSageClient,
+      });
+
+      // Nothing was committed, so the reported counts and the records agree.
+      expect(result).toEqual({ triaged: 0, p0: 0, p1: 0, p2: 0, skip: 0 });
+      const records = loadAllFileRecords(projectId);
+      expect(records.map((r) => r.findings[0].triage)).toEqual([undefined, undefined]);
+    });
+
     it("reports low-confidence findings as untriaged when the Claude fallback is off", async () => {
       writeSingleFinding("src/low.ts", "Low confidence finding");
 
@@ -733,6 +843,45 @@ describe("Sage Triage", () => {
       });
 
       expect(loadAllFileRecords(projectId)[0].findings[0].triage?.model).toBe(SAGE_MODEL_NAME);
+    });
+
+    it("pins the sage model for run meta even when a caller passes another model", async () => {
+      writeFinding("src/pinned.ts", "Pinned model finding");
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P2", confidence: 0.9, probabilities: [] },
+                  },
+                },
+              ],
+            },
+          ],
+          meta: { model: SAGE_MODEL_NAME },
+        })),
+      } as unknown as LevantoSageClient;
+
+      await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        model: "levanto-sage-v1",
+        sageClient: mockSageClient,
+      });
+
+      const findingModel = loadAllFileRecords(projectId)[0].findings[0].triage?.model;
+      expect(findingModel).toBe(SAGE_MODEL_NAME);
+
+      const runModels = listRuns(projectId).map((r) => r.processorConfig?.model);
+      expect(runModels).toContain(SAGE_MODEL_NAME);
+      expect(runModels).not.toContain("levanto-sage-v1");
     });
 
     it("binds same-title verdicts across files to distinct findings", async () => {

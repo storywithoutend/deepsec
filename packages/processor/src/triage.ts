@@ -349,7 +349,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
     fallbackToClaude = true,
   } = params;
 
-  const model = params.model ?? (provider === "sage" ? SAGE_MODEL_NAME : CLAUDE_DEFAULT_MODEL);
+  const model = provider === "sage" ? SAGE_MODEL_NAME : (params.model ?? CLAUDE_DEFAULT_MODEL);
 
   const emit = (progress: TriageProgress) => {
     try {
@@ -438,6 +438,10 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
     const dirtyRecords = new Set<FileRecord>();
     const lowConfidence: typeof toTriage = [];
     const undecided: typeof toTriage = [];
+    const staged: {
+      item: (typeof toTriage)[number];
+      triage: NonNullable<Finding["triage"]>;
+    }[] = [];
 
     let sageTriagedInBatch = 0;
     let batchP0 = 0;
@@ -483,13 +487,13 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         const groupResult = batchResponse.results?.[i];
 
         const priorityAnswer =
-          groupResult?.answers?.find((a) => a.ok && a.result.id === "priority") ??
+          groupResult?.answers?.find((a) => a.ok && a.result?.id === "priority") ??
           groupResult?.answers?.[0];
         const exploitabilityAnswer =
-          groupResult?.answers?.find((a) => a.ok && a.result.id === "exploitability") ??
+          groupResult?.answers?.find((a) => a.ok && a.result?.id === "exploitability") ??
           groupResult?.answers?.[1];
         const impactAnswer =
-          groupResult?.answers?.find((a) => a.ok && a.result.id === "impact") ??
+          groupResult?.answers?.find((a) => a.ok && a.result?.id === "impact") ??
           groupResult?.answers?.[2];
 
         if (!priorityAnswer?.ok) {
@@ -498,7 +502,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
           continue;
         }
 
-        const priorityResult = priorityAnswer.result.result as SageChoiceResult | undefined;
+        const priorityResult = priorityAnswer.result?.result as SageChoiceResult | undefined;
         const chosenPriority = priorityResult?.chosen;
         const confidence = priorityResult?.confidence;
 
@@ -521,7 +525,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         let exploitability: "trivial" | "moderate" | "difficult" =
           defaultExploitability(chosenPriority);
         if (exploitabilityAnswer?.ok) {
-          const expChosen = (exploitabilityAnswer.result.result as SageChoiceResult | undefined)
+          const expChosen = (exploitabilityAnswer.result?.result as SageChoiceResult | undefined)
             ?.chosen;
           if (isExploitability(expChosen)) {
             exploitability = expChosen;
@@ -530,7 +534,7 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
 
         let impact: "critical" | "high" | "medium" | "low" = defaultImpact(chosenPriority);
         if (impactAnswer?.ok) {
-          const impChosen = (impactAnswer.result.result as SageChoiceResult | undefined)?.chosen;
+          const impChosen = (impactAnswer.result?.result as SageChoiceResult | undefined)?.chosen;
           if (isImpact(impChosen)) {
             impact = impChosen;
           }
@@ -540,22 +544,28 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
         const confidenceStr = hasConfidence ? `${(confidence * 100).toFixed(0)}%` : "unknown";
         const reasoning = `Levanto Sage decision: ${chosenPriority} (confidence: ${confidenceStr}${probStr})`;
 
-        item.finding.triage = {
-          priority: chosenPriority,
-          exploitability,
-          impact,
-          reasoning,
-          triagedAt: new Date().toISOString(),
-          model: SAGE_MODEL_NAME,
-        };
+        staged.push({
+          item,
+          triage: {
+            priority: chosenPriority,
+            exploitability,
+            impact,
+            reasoning,
+            triagedAt: new Date().toISOString(),
+            model: SAGE_MODEL_NAME,
+          },
+        });
+      }
+
+      for (const { item, triage } of staged) {
+        item.finding.triage = triage;
+        dirtyRecords.add(item.record);
 
         sageTriagedInBatch++;
-        if (chosenPriority === "P0") batchP0++;
-        else if (chosenPriority === "P1") batchP1++;
-        else if (chosenPriority === "P2") batchP2++;
+        if (triage.priority === "P0") batchP0++;
+        else if (triage.priority === "P1") batchP1++;
+        else if (triage.priority === "P2") batchP2++;
         else batchSkip++;
-
-        dirtyRecords.add(item.record);
       }
 
       for (const record of dirtyRecords) {
