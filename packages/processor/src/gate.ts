@@ -53,16 +53,19 @@ export function getRuleDescription(slug: string): string {
  *
  * Many matchers report every hit in a file as one candidate, so a single span
  * from the first to the last match can cover the whole file. Instead each hit
- * gets its own bounded window; overlapping windows are merged, non-contiguous
- * ones are separated by an elision marker, and the total number of code lines
- * is capped at `maxLines`. Hits that do not fit are reported back through
- * `coveredLines` so the caller never advertises context it did not send.
+ * gets its own window; overlapping windows are merged, non-contiguous ones are
+ * separated by an elision marker, and the extract is bounded by both `maxLines`
+ * and `maxChars` so it survives into the request unclamped. Windows start
+ * minimal when there are many hits and then grow outward — up to `contextLines`
+ * of padding — while budget remains. Hits that do not fit are reported back
+ * through `coveredLines`, which is what tells the caller its view was partial.
  */
 export function extractCandidateContext(
   content: string,
   lineNumbers: number[],
   contextLines = 10,
   maxLines = GATE_CONTEXT_LINE_LIMIT,
+  maxChars = GATE_BLOCK_CHAR_LIMIT,
 ): { text: string; coveredLines: number[] } {
   const lines = content.split("\n");
   if (lines.length === 0) return { text: "", coveredLines: [] };
@@ -78,31 +81,90 @@ export function extractCandidateContext(
   ).sort((a, b) => a - b);
   if (validLines.length === 0) return { text: content.slice(0, 1000), coveredLines: [] };
 
-  // Windows shrink to the matched line alone when a candidate carries many
-  // hits, so the fixed budget covers as many of them as possible instead of
-  // reserving padding for the first few and truncating the rest.
   const perHit = Math.max(1, Math.floor(maxLines / validLines.length));
   const half = Math.min(contextLines, Math.floor((perHit - 1) / 2));
 
-  const spans: { start: number; end: number }[] = [];
+  const spans: { start: number; end: number; minStart: number; maxEnd: number }[] = [];
   for (const line of validLines) {
     const start = Math.max(0, line - 1 - half);
     const end = Math.min(lines.length, line + half);
+    const minStart = Math.max(0, line - 1 - contextLines);
+    const maxEnd = Math.min(lines.length, line + contextLines);
     const last = spans[spans.length - 1];
     if (last && start <= last.end) {
       last.end = Math.max(last.end, end);
+      last.maxEnd = Math.max(last.maxEnd, maxEnd);
     } else {
-      spans.push({ start, end });
+      spans.push({ start, end, minStart, maxEnd });
     }
   }
 
-  const emitted: { start: number; end: number }[] = [];
-  let budget = maxLines;
+  const lineCost = (index: number) => lines[index].length + 1;
+  const ELISION_COST = 2;
+
+  let lineBudget = maxLines;
+  let charBudget = maxChars;
+  const emitted: { start: number; end: number; minStart: number; maxEnd: number }[] = [];
+  let truncated = false;
   for (const span of spans) {
-    if (budget <= 0) break;
-    const end = Math.min(span.end, span.start + budget);
-    emitted.push({ start: span.start, end });
-    budget -= end - span.start;
+    if (emitted.length > 0) {
+      if (charBudget - ELISION_COST < 0) {
+        truncated = true;
+        break;
+      }
+      charBudget -= ELISION_COST;
+    }
+    let end = span.start;
+    while (end < span.end && lineBudget > 0 && charBudget - lineCost(end) >= 0) {
+      charBudget -= lineCost(end);
+      lineBudget--;
+      end++;
+    }
+    if (end === span.start) {
+      truncated = true;
+      break;
+    }
+    emitted.push({ ...span, end });
+    if (end < span.end) {
+      truncated = true;
+      break;
+    }
+  }
+
+  // Every hit fit, so spend what is left widening the windows rather than
+  // asking Sage to judge bare matched lines.
+  if (!truncated) {
+    let grew = true;
+    while (grew && lineBudget > 0 && charBudget > 0) {
+      grew = false;
+      for (let i = 0; i < emitted.length; i++) {
+        const span = emitted[i];
+        const prev = emitted[i - 1];
+        if (
+          lineBudget > 0 &&
+          span.start > span.minStart &&
+          (!prev || span.start - 1 >= prev.end) &&
+          charBudget - lineCost(span.start - 1) >= 0
+        ) {
+          charBudget -= lineCost(span.start - 1);
+          lineBudget--;
+          span.start--;
+          grew = true;
+        }
+        const next = emitted[i + 1];
+        if (
+          lineBudget > 0 &&
+          span.end < span.maxEnd &&
+          (!next || span.end < next.start) &&
+          charBudget - lineCost(span.end) >= 0
+        ) {
+          charBudget -= lineCost(span.end);
+          lineBudget--;
+          span.end++;
+          grew = true;
+        }
+      }
+    }
   }
 
   const blocks = emitted.map((span) => lines.slice(span.start, span.end).join("\n"));
@@ -309,12 +371,12 @@ export async function filterCandidatesWithSage(
       for (const candidate of record.candidates) {
         let surroundingContext: string | undefined;
         let contextLineNumbers = candidate.lineNumbers;
-        let partialContext = false;
+        let partialContext = candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
         if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
           const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
           surroundingContext = extracted.text;
           contextLineNumbers = extracted.coveredLines;
-          partialContext = extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
+          partialContext ||= extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
         }
 
         const ruleDesc = resolveDescription(candidate.vulnSlug);
@@ -351,12 +413,12 @@ export async function filterCandidatesWithSage(
     for (const candidate of params.candidates) {
       let surroundingContext: string | undefined;
       let contextLineNumbers = candidate.lineNumbers;
-      let partialContext = false;
+      let partialContext = candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
       if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
         const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
         surroundingContext = extracted.text;
         contextLineNumbers = extracted.coveredLines;
-        partialContext = extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
+        partialContext ||= extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
       }
 
       const ruleDesc = resolveDescription(candidate.vulnSlug);

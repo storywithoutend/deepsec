@@ -84,6 +84,30 @@ describe("Sage candidate gate", () => {
       expect(coveredLines).toEqual(hits);
     });
 
+    it("spends leftover budget widening the windows of a many-hit candidate", () => {
+      const content = Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n");
+      const hits = Array.from({ length: 21 }, (_, i) => 20 + i * 40);
+      const { text, coveredLines } = extractCandidateContext(content, hits);
+
+      const codeLines = text.split("\n").filter((l: string) => l !== "…");
+      expect(coveredLines).toEqual(hits);
+      // Bare matched lines alone would be 21; the rest of the budget buys
+      // surrounding context instead of going unused.
+      expect(codeLines.length).toBeGreaterThan(hits.length);
+      expect(codeLines.length).toBeLessThanOrEqual(GATE_CONTEXT_LINE_LIMIT);
+    });
+
+    it("stops at the character budget so the context is never clamped later", () => {
+      const wide = "x".repeat(300);
+      const content = Array.from({ length: 2000 }, (_, i) => `${wide} ${i + 1}`).join("\n");
+      const hits = Array.from({ length: 40 }, (_, i) => 20 + i * 40);
+      const { text, coveredLines } = extractCandidateContext(content, hits);
+
+      expect(text.length).toBeLessThanOrEqual(GATE_BLOCK_CHAR_LIMIT);
+      // Coverage reflects the character cap, not just the line cap.
+      expect(coveredLines.length).toBeLessThan(hits.length);
+    });
+
     it("drops hit lines past the end of the file instead of inflating the budget", () => {
       // A stale record: the file shrank after it was scanned.
       const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
@@ -1028,6 +1052,99 @@ describe("Sage candidate gate", () => {
       // candidate — the gate must actually save the agent run here.
       expect(result.filteredCount).toBe(1);
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([]);
+    });
+
+    it("retains a candidate whose context was cut by the character budget", async () => {
+      const filePath = "src/wide-lines.ts";
+      const fullPath = path.join(tmpDir, filePath);
+      const wide = "x".repeat(300);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(
+        fullPath,
+        `${Array.from({ length: 2000 }, (_, i) => `${wide} ${i + 1}`).join("\n")}\n`,
+      );
+
+      const candidate: CandidateMatch = {
+        vulnSlug: "crypto-usage",
+        // Few enough hits to fit the line budget, too wide to fit the char budget.
+        lineNumbers: Array.from({ length: 40 }, (_, i) => 20 + i * 40),
+        snippet: `${wide} 20`,
+        matchedPattern: "crypto",
+      };
+      const record = createTestRecord(filePath, [candidate]);
+
+      let capturedContent = "";
+      const mockSageClient = {
+        decideBatch: vi.fn(async (req: any) => {
+          capturedContent = req.requests[0].content;
+          return {
+            results: [
+              {
+                answers: [
+                  {
+                    ok: true,
+                    result: {
+                      id: "benign_false_positive",
+                      kind: "yesno",
+                      result: { answer: "yes", confidence: 0.99 },
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }),
+      };
+
+      const result = await filterCandidatesWithSage({
+        records: [record],
+        rootPath: tmpDir,
+        sageClient: mockSageClient as any,
+      });
+
+      // The payload never needed the defensive clamp…
+      expect(capturedContent).not.toContain("… (truncated)");
+      // …and the hits that did not fit keep the candidate alive.
+      expect(result.decisions[0].answer).toBe("yes");
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
+    });
+
+    it("retains a candidate whose snippet is too large to send in full", async () => {
+      const candidate: CandidateMatch = {
+        vulnSlug: "rce",
+        lineNumbers: [1],
+        snippet: "x".repeat(GATE_BLOCK_CHAR_LIMIT * 2),
+        matchedPattern: "exec",
+      };
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "benign_false_positive",
+                    kind: "yesno",
+                    result: { answer: "yes", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+          ],
+        })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates: [candidate],
+        filePath: "src/huge.ts",
+        sageClient: mockSageClient as any,
+      });
+
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidates).toEqual([candidate]);
     });
 
     it("retains a candidate whose hits did not all fit the context window", async () => {
