@@ -1,4 +1,5 @@
 export {
+  isPermanentSageError,
   isRetryableSageError,
   LevantoSageAuthError,
   LevantoSageClient,

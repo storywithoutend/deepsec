@@ -13,9 +13,8 @@ import {
   writeRunMeta,
 } from "@deepsec/core";
 import {
-  isRetryableSageError,
+  isPermanentSageError,
   LevantoSageClient,
-  LevantoSageError,
   type SageChoiceResult,
   type SageOption,
   type SageOptionProbability,
@@ -153,10 +152,6 @@ function defaultExploitability(priority: TriagePriority): "trivial" | "moderate"
     default:
       return "difficult";
   }
-}
-
-function isPermanentSageError(err: unknown): boolean {
-  return err instanceof LevantoSageError && !isRetryableSageError(err);
 }
 
 function isTriagePriority(value: unknown): value is TriagePriority {

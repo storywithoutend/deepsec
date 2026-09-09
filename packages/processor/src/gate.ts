@@ -4,6 +4,7 @@ import type { CandidateMatch, FileRecord } from "@deepsec/core";
 import { getRegistry } from "@deepsec/core";
 import { createDefaultRegistry } from "@deepsec/scanner";
 import {
+  isPermanentSageError,
   LevantoSageClient,
   type SageBatchRequestGroup,
   type SageYesNoQuestion,
@@ -305,9 +306,49 @@ export async function filterCandidatesWithSage(
   const decisions: CandidateGateDecision[] = [];
   const batchSize = params.batchSize ?? GATE_BATCH_SIZE;
 
+  const recordVerdict = (item: ItemToEvaluate, rawResult: unknown) => {
+    const { answer, confidence } = parseYesNoResult(rawResult);
+    const isBenign = answer === "yes";
+    const isHighConfidence =
+      typeof confidence === "number" && !Number.isNaN(confidence) && confidence >= threshold;
+    decisions.push({
+      candidate: item.candidate,
+      filePath: item.filePath,
+      filtered: isBenign && isHighConfidence,
+      answer,
+      confidence,
+    });
+  };
+
+  const recordUnevaluated = (unevaluated: ItemToEvaluate[], error: string) => {
+    for (const item of unevaluated) {
+      decisions.push({
+        candidate: item.candidate,
+        filePath: item.filePath,
+        filtered: false,
+        error,
+      });
+    }
+  };
+
+  params.onProgress?.({
+    type: "sage_gate",
+    message: `Evaluating ${items.length} candidate(s) in chunks of ${batchSize}…`,
+  });
+
+  // A bad key, an exhausted quota or a rejected request fails the same way on
+  // every remaining chunk. Record the failure once and fail the rest open
+  // without issuing more known-doomed round trips.
+  let permanentError: string | undefined;
+
   // Process items in chunks
   for (let i = 0; i < items.length; i += batchSize) {
     const chunk = items.slice(i, i + batchSize);
+
+    if (permanentError) {
+      recordUnevaluated(chunk, permanentError);
+      continue;
+    }
 
     if (typeof sageClient.decideBatch === "function") {
       try {
@@ -327,54 +368,48 @@ export async function filterCandidatesWithSage(
           requests,
         });
 
-        for (let j = 0; j < chunk.length; j++) {
-          const item = chunk[j];
-          const groupResult = batchResponse?.results?.[j];
-          const answer =
-            groupResult?.answers?.find((a) => a.ok && a.result?.id === GATE_QUESTION_ID) ??
-            groupResult?.answers?.[0];
+        const results = batchResponse?.results;
+        if (!results || results.length !== chunk.length) {
+          // Group results are bound to requests by position only. A response of
+          // a different length means we cannot tell which verdict belongs to
+          // which candidate, and mis-binding one would silently drop a real
+          // vulnerability — treat the whole chunk as unevaluated.
+          recordUnevaluated(
+            chunk,
+            `Batch response had ${results?.length ?? 0} result(s) for ${chunk.length} request(s)`,
+          );
+        } else {
+          for (let j = 0; j < chunk.length; j++) {
+            const item = chunk[j];
+            const groupResult = results[j];
+            const answer =
+              groupResult?.answers?.find((a) => a.ok && a.result?.id === GATE_QUESTION_ID) ??
+              groupResult?.answers?.[0];
 
-          if (!answer || !answer.ok) {
-            // Fail open on error in individual batch answer
-            decisions.push({
-              candidate: item.candidate,
-              filePath: item.filePath,
-              filtered: false,
-              error: !answer ? "Missing answer" : answer.error,
-            });
-            continue;
+            if (!answer || !answer.ok) {
+              // Fail open on error in individual batch answer
+              recordUnevaluated([item], !answer ? "Missing answer" : answer.error);
+              continue;
+            }
+
+            recordVerdict(item, (answer.result?.result ?? answer.result) as unknown);
           }
-
-          const rawResult = (answer.result?.result ?? answer.result) as unknown;
-          const { answer: ans, confidence } = parseYesNoResult(rawResult);
-
-          const isBenign = ans === "yes";
-          const isHighConfidence =
-            typeof confidence === "number" && !Number.isNaN(confidence) && confidence >= threshold;
-          const filtered = isBenign && isHighConfidence;
-
-          decisions.push({
-            candidate: item.candidate,
-            filePath: item.filePath,
-            filtered,
-            answer: ans,
-            confidence,
-          });
         }
       } catch (err) {
         // Network or API failure fails open (retains all candidates in chunk)
-        for (const item of chunk) {
-          decisions.push({
-            candidate: item.candidate,
-            filePath: item.filePath,
-            filtered: false,
-            error: err instanceof Error ? err.message : String(err),
-          });
+        const message = err instanceof Error ? err.message : String(err);
+        if (isPermanentSageError(err)) {
+          permanentError = message;
         }
+        recordUnevaluated(chunk, message);
       }
     } else if (typeof sageClient.decide === "function") {
       // Fallback for single decide API
       for (const item of chunk) {
+        if (permanentError) {
+          recordUnevaluated([item], permanentError);
+          continue;
+        }
         try {
           const question: SageYesNoQuestion = {
             id: GATE_QUESTION_ID,
@@ -385,41 +420,24 @@ export async function filterCandidatesWithSage(
             content: item.content,
             question,
           });
-          const rawResult = (res?.result ?? res) as unknown;
-          const { answer: ans, confidence } = parseYesNoResult(rawResult);
-
-          const isBenign = ans === "yes";
-          const isHighConfidence =
-            typeof confidence === "number" && !Number.isNaN(confidence) && confidence >= threshold;
-          const filtered = isBenign && isHighConfidence;
-
-          decisions.push({
-            candidate: item.candidate,
-            filePath: item.filePath,
-            filtered,
-            answer: ans,
-            confidence,
-          });
+          recordVerdict(item, (res?.result ?? res) as unknown);
         } catch (err) {
-          decisions.push({
-            candidate: item.candidate,
-            filePath: item.filePath,
-            filtered: false,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          const message = err instanceof Error ? err.message : String(err);
+          if (isPermanentSageError(err)) {
+            permanentError = message;
+          }
+          recordUnevaluated([item], message);
         }
       }
     } else {
       // No supported decision method on client — fail open
-      for (const item of chunk) {
-        decisions.push({
-          candidate: item.candidate,
-          filePath: item.filePath,
-          filtered: false,
-          error: "Sage client does not implement decideBatch or decide",
-        });
-      }
+      recordUnevaluated(chunk, "Sage client does not implement decideBatch or decide");
     }
+
+    params.onProgress?.({
+      type: "sage_gate",
+      message: `${decisions.length}/${items.length} candidate(s) evaluated (${decisions.filter((d) => d.filtered).length} filtered so far)`,
+    });
   }
 
   const decisionMap = new Map<CandidateMatch, CandidateGateDecision>();

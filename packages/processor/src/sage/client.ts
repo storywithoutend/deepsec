@@ -239,6 +239,15 @@ export function isRetryableSageError(
   return err instanceof LevantoSageServerError || err instanceof LevantoSageRateLimitError;
 }
 
+/**
+ * A Sage failure that will repeat identically on every subsequent request in
+ * this run — bad key, exhausted quota, rejected request. Callers use it to
+ * stop issuing known-doomed calls.
+ */
+export function isPermanentSageError(err: unknown): err is LevantoSageError {
+  return err instanceof LevantoSageError && !isRetryableSageError(err);
+}
+
 export interface LevantoSageClientOptions {
   apiKey?: string;
   baseUrl?: string;

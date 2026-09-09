@@ -12,7 +12,7 @@ import {
   parseYesNoResult,
   SAGE_GATE_QUESTION_INSTRUCTIONS,
 } from "../gate.js";
-import { LevantoSageServerError } from "../sage/client.js";
+import { LevantoSageAuthError, LevantoSageServerError } from "../sage/client.js";
 
 function createTestRecord(filePath: string, candidates: CandidateMatch[] = []): FileRecord {
   return {
@@ -610,6 +610,106 @@ describe("Sage candidate gate", () => {
       expect(result.retainedCandidates).toEqual([candidate]);
     });
 
+    it("stops calling Sage after a permanent error and fails the rest open", async () => {
+      const candidates: CandidateMatch[] = [1, 2, 3, 4].map((n) => ({
+        vulnSlug: "sql-injection",
+        lineNumbers: [n],
+        snippet: `query${n}()`,
+        matchedPattern: "query",
+      }));
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => {
+          throw new LevantoSageAuthError("API key required or invalid.");
+        }),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates,
+        batchSize: 1,
+        sageClient: mockSageClient as any,
+      });
+
+      // One doomed round trip, not one per chunk.
+      expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(1);
+      // Every candidate is still accounted for and retained.
+      expect(result.errorCount).toBe(4);
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidates).toEqual(candidates);
+      expect(result.errors).toEqual(["API key required or invalid."]);
+    });
+
+    it("keeps calling Sage after a retryable error", async () => {
+      const candidates: CandidateMatch[] = [1, 2].map((n) => ({
+        vulnSlug: "xss",
+        lineNumbers: [n],
+        snippet: `innerHTML${n}`,
+        matchedPattern: "innerHTML",
+      }));
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => {
+          throw new LevantoSageServerError("Internal server error", { status: 500 });
+        }),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates,
+        batchSize: 1,
+        sageClient: mockSageClient as any,
+      });
+
+      expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(2);
+      expect(result.errorCount).toBe(2);
+      expect(result.retainedCount).toBe(2);
+    });
+
+    it("fails the whole chunk open when the batch response length does not match", async () => {
+      const realVuln: CandidateMatch = {
+        vulnSlug: "sql-injection",
+        lineNumbers: [1],
+        snippet: "db.query('SELECT ' + input)",
+        matchedPattern: "SELECT",
+      };
+      const other: CandidateMatch = {
+        vulnSlug: "xss",
+        lineNumbers: [2],
+        snippet: "el.innerHTML = 'constant'",
+        matchedPattern: "innerHTML",
+      };
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          // One result for two requests: positional binding would score the
+          // real vulnerability with a verdict meant for another candidate.
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "benign_false_positive",
+                    kind: "yesno",
+                    result: { answer: "yes", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+          ],
+        })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates: [realVuln, other],
+        sageClient: mockSageClient as any,
+      });
+
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidates).toEqual([realVuln, other]);
+      expect(result.errorCount).toBe(2);
+      expect(result.errors[0]).toContain("1 result(s) for 2 request(s)");
+    });
+
     it("works with single decide API and fails open on single decide error", async () => {
       const candidate: CandidateMatch = {
         vulnSlug: "sql-injection",
@@ -856,6 +956,48 @@ describe("Sage candidate gate", () => {
       expect(record2.candidates).toEqual([benignCand2]);
 
       expect(progressMessage).toContain("Filtered 2 candidate(s)");
+    });
+
+    it("emits progress at the start and after each chunk", async () => {
+      const candidates: CandidateMatch[] = [1, 2].map((n) => ({
+        vulnSlug: "xss",
+        lineNumbers: [n],
+        snippet: `innerHTML${n}`,
+        matchedPattern: "innerHTML",
+      }));
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "benign_false_positive",
+                    kind: "yesno",
+                    result: { answer: "yes", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+          ],
+        })),
+      };
+
+      const messages: string[] = [];
+      await filterCandidatesWithSage({
+        candidates,
+        batchSize: 1,
+        sageClient: mockSageClient as any,
+        onProgress: (p) => {
+          messages.push(p.message);
+        },
+      });
+
+      expect(messages[0]).toContain("Evaluating 2 candidate(s)");
+      expect(messages[1]).toContain("1/2 candidate(s) evaluated");
+      expect(messages[2]).toContain("2/2 candidate(s) evaluated");
     });
 
     it("returns empty result when no candidates exist", async () => {

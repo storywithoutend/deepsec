@@ -665,18 +665,19 @@ export async function process(params: {
         rootPath: effectiveRootPath,
         threshold: params.sageGateConfidence,
         sageClient: params.sageClient,
+        onProgress: (p) => emitProgress({ type: "sage_gate", message: p.message }),
       });
       candidatesFilteredBySage = gateResult.filteredCount;
       gatedCandidatesByFile = gateResult.retainedCandidatesByFile;
       emitProgress({
         type: "sage_gate",
-        message: `Sage candidate gate: filtered ${candidatesFilteredBySage} candidate(s) (${gateResult.retainedCount} remaining across ${toProcess.length} file(s))`,
+        message: `filtered ${candidatesFilteredBySage} candidate(s) (${gateResult.retainedCount} remaining across ${toProcess.length} file(s))`,
       });
       if (gateResult.errorCount > 0) {
         sageGateErrors = { count: gateResult.errorCount, messages: gateResult.errors };
         emitProgress({
           type: "sage_gate",
-          message: `Sage candidate gate: ${gateResult.errorCount} candidate(s) could not be evaluated and were retained — ${gateResult.errors.join("; ")}`,
+          message: `${gateResult.errorCount} candidate(s) could not be evaluated and were retained — ${gateResult.errors.join("; ")}`,
         });
       }
 
@@ -703,7 +704,7 @@ export async function process(params: {
         sageGateSkippedFiles = skipped.length;
         emitProgress({
           type: "sage_gate",
-          message: `Sage candidate gate: skipped ${skipped.length} file(s) with no remaining candidates`,
+          message: `skipped ${skipped.length} file(s) with no remaining candidates`,
         });
       }
 

@@ -151,11 +151,15 @@ What that means across runs depends on whether the gate cleared the whole
 file:
 
 - **Every candidate filtered** — the file is never handed to the agent
-  and keeps the status it had before the run, so it stays selectable. A
-  later plain `process` investigates it normally, and a later
-  `--sage-gate` run re-sends it to Sage and skips it again: an all-benign
-  file is re-gated on every run (a small repeated Sage cost, never an
-  agent cost) rather than being recorded as decided.
+  and keeps whatever status it had before the run. A file that was
+  pending stays pending, so it remains in the default work set: a later
+  plain `process` investigates it normally, and a later `--sage-gate` run
+  re-sends it to Sage and skips it again (a small repeated Sage cost,
+  never an agent cost) rather than recording the verdict as decided. A
+  file that was already `analyzed` — only reachable in force mode, via
+  `--reinvestigate` or `process --files` — stays `analyzed`, so it keeps
+  counting in `report` and `metrics` and needs `--reinvestigate` to be
+  looked at again.
 - **Some candidates filtered** — the agent investigates the rest and the
   file ends the run `analyzed`, which takes it out of the default work
   set. The filtered candidates are still on the record, but no later run

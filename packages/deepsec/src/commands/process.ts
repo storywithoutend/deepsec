@@ -130,6 +130,24 @@ export async function processCommand(opts: {
   return processStandardMode(opts);
 }
 
+function printSageGateSummary(result: {
+  candidatesFilteredBySage?: number;
+  sageGateSkippedFiles?: number;
+  sageGateErrors?: { count: number; messages: string[] };
+}): void {
+  if (result.candidatesFilteredBySage !== undefined) {
+    console.log(`  Candidates filtered by Sage: ${result.candidatesFilteredBySage}`);
+  }
+  if (result.sageGateSkippedFiles) {
+    console.log(`  Files skipped by Sage gate: ${result.sageGateSkippedFiles}`);
+  }
+  if (result.sageGateErrors) {
+    console.log(
+      `  ${YELLOW}Sage gate errors: ${result.sageGateErrors.count} candidate(s) not evaluated and kept — ${result.sageGateErrors.messages.join("; ")}${RESET}`,
+    );
+  }
+}
+
 function assertSageGateOptions(opts: { sageGate?: boolean; sageGateConfidence?: number }): void {
   if (opts.sageGateConfidence !== undefined && !opts.sageGate) {
     throw new Error("--sage-gate-confidence requires --sage-gate");
@@ -226,17 +244,7 @@ async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
   console.log(`${GREEN}Processing complete.${RESET} Run: ${BOLD}${result.runId}${RESET}`);
   console.log(`  Analyses: ${result.analysisCount}`);
   console.log(`  Findings: ${result.findingCount}`);
-  if (result.candidatesFilteredBySage !== undefined) {
-    console.log(`  Candidates filtered by Sage: ${result.candidatesFilteredBySage}`);
-  }
-  if (result.sageGateSkippedFiles) {
-    console.log(`  Files skipped by Sage gate: ${result.sageGateSkippedFiles}`);
-  }
-  if (result.sageGateErrors) {
-    console.log(
-      `  ${YELLOW}Sage gate errors: ${result.sageGateErrors.count} candidate(s) not evaluated and kept — ${result.sageGateErrors.messages.join("; ")}${RESET}`,
-    );
-  }
+  printSageGateSummary(result);
   if (result.errorBatchCount > 0) {
     console.log(`  ${RED}Errored batches: ${result.errorBatchCount}${RESET}`);
   }
@@ -396,17 +404,7 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
   console.log(`${GREEN}Processing complete.${RESET} Run: ${BOLD}${result.runId}${RESET}`);
   console.log(`  Analyses: ${result.analysisCount}`);
   console.log(`  Findings: ${result.findingCount}`);
-  if (result.candidatesFilteredBySage !== undefined) {
-    console.log(`  Candidates filtered by Sage: ${result.candidatesFilteredBySage}`);
-  }
-  if (result.sageGateSkippedFiles) {
-    console.log(`  Files skipped by Sage gate: ${result.sageGateSkippedFiles}`);
-  }
-  if (result.sageGateErrors) {
-    console.log(
-      `  ${YELLOW}Sage gate errors: ${result.sageGateErrors.count} candidate(s) not evaluated and kept — ${result.sageGateErrors.messages.join("; ")}${RESET}`,
-    );
-  }
+  printSageGateSummary(result);
   if (result.errorBatchCount > 0) {
     console.log(`  ${RED}Errored batches: ${result.errorBatchCount}${RESET}`);
   }
