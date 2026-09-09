@@ -357,7 +357,6 @@ export async function filterCandidatesWithSage(
       if (!record.candidates || record.candidates.length === 0) continue;
 
       let fileContent: string | undefined;
-      let unreadableFile = false;
       if (params.rootPath) {
         try {
           const fullPath = path.isAbsolute(record.filePath)
@@ -366,16 +365,16 @@ export async function filterCandidatesWithSage(
           fileContent = fs.readFileSync(fullPath, "utf-8");
         } catch {
           // Without the file there is no way to show Sage the candidate's hits
-          // or to attest which lines the snippet covers, so every candidate in
-          // this record is judged on a partial view and can only be retained.
-          unreadableFile = true;
+          // or to attest which lines the snippet covers.
         }
       }
 
       for (const candidate of record.candidates) {
         let surroundingContext: string | undefined;
-        let contextLineNumbers = unreadableFile ? undefined : candidate.lineNumbers;
-        let partialContext = unreadableFile || candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
+        // No file content means the payload is the snippet alone, which cannot
+        // be shown to cover the candidate's hits — such a view can only retain.
+        let contextLineNumbers = fileContent ? candidate.lineNumbers : undefined;
+        let partialContext = !fileContent || candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
         if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
           const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
           surroundingContext = extracted.text;
@@ -403,7 +402,6 @@ export async function filterCandidatesWithSage(
     }
   } else if (params.candidates) {
     let fileContent = params.fileContent;
-    let unreadableFile = false;
     if (!fileContent && params.rootPath && params.filePath) {
       try {
         const fullPath = path.isAbsolute(params.filePath)
@@ -411,14 +409,14 @@ export async function filterCandidatesWithSage(
           : path.join(params.rootPath, params.filePath);
         fileContent = fs.readFileSync(fullPath, "utf-8");
       } catch {
-        unreadableFile = true;
+        // Ignored — the snippet-only path below keeps the candidate.
       }
     }
 
     for (const candidate of params.candidates) {
       let surroundingContext: string | undefined;
-      let contextLineNumbers = unreadableFile ? undefined : candidate.lineNumbers;
-      let partialContext = unreadableFile || candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
+      let contextLineNumbers = fileContent ? candidate.lineNumbers : undefined;
+      let partialContext = !fileContent || candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
       if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
         const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
         surroundingContext = extracted.text;

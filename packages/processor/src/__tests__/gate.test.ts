@@ -21,6 +21,20 @@ import {
   LevantoSageValidationError,
 } from "../sage/client.js";
 
+function fileWithLines(count = 60): string {
+  return Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
+}
+
+function writeScratchRoot(files: Record<string, string>): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deepsec-gate-root-"));
+  for (const [relPath, content] of Object.entries(files)) {
+    const full = path.join(dir, relPath);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content);
+  }
+  return dir;
+}
+
 function createTestRecord(filePath: string, candidates: CandidateMatch[] = []): FileRecord {
   return {
     filePath,
@@ -255,6 +269,7 @@ describe("Sage candidate gate", () => {
       const result = await filterCandidatesWithSage({
         candidates: [mockCandidate],
         filePath: "src/db.ts",
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -288,6 +303,7 @@ describe("Sage candidate gate", () => {
         matchedPattern: "SELECT",
       };
       const record = createTestRecord("src/queries.ts", [benignCandidate]);
+      const rootPath = writeScratchRoot({ "src/queries.ts": fileWithLines() });
 
       const mockSageClient = {
         decideBatch: vi.fn(async () => ({
@@ -310,6 +326,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         records: [record],
+        rootPath,
         sageClient: mockSageClient as any,
       });
 
@@ -322,6 +339,51 @@ describe("Sage candidate gate", () => {
   });
 
   describe("vulnerability retention", () => {
+    it("retains a candidate when no file content was available to gate on", async () => {
+      const candidate: CandidateMatch = {
+        vulnSlug: "crypto-usage",
+        // The snippet covers the first hit only; the others exist solely in the
+        // file, which the caller gave the gate no way to read.
+        lineNumbers: [12, 40, 88, 140],
+        snippet: "hash := md5.New()",
+        matchedPattern: "md5",
+      };
+      const record = createTestRecord("pkg/crypto/util.go", [candidate]);
+
+      let capturedContent = "";
+      const mockSageClient = {
+        decideBatch: vi.fn(async (req: any) => {
+          capturedContent = req.requests[0].content;
+          return {
+            results: [
+              {
+                answers: [
+                  {
+                    ok: true,
+                    result: {
+                      id: "benign_false_positive",
+                      kind: "yesno",
+                      result: { answer: "yes", confidence: 0.99 },
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }),
+      };
+
+      const result = await filterCandidatesWithSage({
+        records: [record],
+        sageClient: mockSageClient as any,
+      });
+
+      expect(capturedContent).not.toContain("lines 12, 40, 88, 140");
+      expect(result.decisions[0].answer).toBe("yes");
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidatesByFile.get("pkg/crypto/util.go")).toEqual([candidate]);
+    });
+
     it("retains candidate when Sage answers 'no' (vulnerability plausible) with high confidence", async () => {
       const realVulnCandidate: CandidateMatch = {
         vulnSlug: "sql-injection",
@@ -435,6 +497,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -513,6 +576,7 @@ describe("Sage candidate gate", () => {
       // With threshold 0.90, confidence 0.88 is retained
       const retainedResult = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         threshold: 0.9,
         sageClient: mockSageClient as any,
       });
@@ -522,6 +586,7 @@ describe("Sage candidate gate", () => {
       // With threshold 0.85, confidence 0.88 is filtered
       const filteredResult = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         threshold: 0.85,
         sageClient: mockSageClient as any,
       });
@@ -623,6 +688,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [c1, c2],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -775,6 +841,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates,
+        fileContent: fileWithLines(),
         batchSize: 1,
         sageClient: mockSageClient as any,
       });
@@ -1355,6 +1422,10 @@ describe("Sage candidate gate", () => {
 
       const record1 = createTestRecord("file1.ts", [benignCand1, realCand]);
       const record2 = createTestRecord("file2.ts", [benignCand2]);
+      const rootPath = writeScratchRoot({
+        "file1.ts": fileWithLines(),
+        "file2.ts": fileWithLines(),
+      });
 
       const mockSageClient = {
         decideBatch: vi.fn(async (req: any) => ({
@@ -1381,6 +1452,7 @@ describe("Sage candidate gate", () => {
       let progressMessage = "";
       const result = await filterCandidatesWithSage({
         records: [record1, record2],
+        rootPath,
         sageClient: mockSageClient as any,
         onProgress: (p) => {
           progressMessage = p.message;

@@ -51,13 +51,22 @@ describe("triageCommand option resolution", () => {
     expect(vi.mocked(triage)).toHaveBeenCalledTimes(2);
   });
 
-  it("--sage selects the sage provider and its model, overriding --provider/--model", async () => {
-    await triageCommand({ sage: true, provider: "claude", model: "claude-sonnet-4-6" });
+  it("--sage selects the sage provider and its model, overriding --provider", async () => {
+    await triageCommand({ sage: true, provider: "claude" });
 
     expect(vi.mocked(triage)).toHaveBeenCalledTimes(1);
     const args = vi.mocked(triage).mock.calls[0][0];
     expect(args.provider).toBe("sage");
     expect(args.model).toBe(SAGE_MODEL_NAME);
+  });
+
+  it("rejects a conflicting --model under the --sage shorthand too", async () => {
+    // The long form already refuses it; silently dropping it here would run a
+    // different model than the one the user asked for without saying so.
+    await expect(triageCommand({ sage: true, model: "claude-sonnet-4-6" })).rejects.toThrow(
+      /not available for the sage provider/,
+    );
+    expect(vi.mocked(triage)).not.toHaveBeenCalled();
   });
 
   it("rejects a --model the sage provider cannot honor", async () => {

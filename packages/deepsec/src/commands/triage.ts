@@ -65,7 +65,7 @@ export async function triageCommand(opts: {
   // made and claude-sonnet-4-6 for anything the fallback handled. Sage exposes
   // exactly one model and the batch request carries no model field, so accepting
   // another --model here would put a value in run meta that nothing ever ran.
-  if (provider === "sage" && !opts.sage && opts.model && opts.model !== SAGE_MODEL_NAME) {
+  if (provider === "sage" && opts.model && opts.model !== SAGE_MODEL_NAME) {
     throw new Error(
       `Model "${opts.model}" is not available for the sage provider. Expected "${SAGE_MODEL_NAME}".`,
     );
