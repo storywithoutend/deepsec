@@ -72,14 +72,14 @@ export function extractCandidateContext(
   // A record can outlive the file it was scanned from, so hits past the current
   // end of file are dropped rather than turned into inverted, budget-inflating
   // spans. They stay out of `coveredLines`, which keeps the candidate retained.
-  const validLines = Array.from(
-    new Set(
-      lineNumbers.filter(
-        (n) => typeof n === "number" && !Number.isNaN(n) && n > 0 && n <= lines.length,
-      ),
-    ),
+  const requestedLines = Array.from(
+    new Set(lineNumbers.filter((n) => typeof n === "number" && !Number.isNaN(n) && n > 0)),
   ).sort((a, b) => a - b);
-  if (validLines.length === 0) return { text: content.slice(0, 1000), coveredLines: [] };
+  if (requestedLines.length === 0) return { text: content.slice(0, 1000), coveredLines: [] };
+  const validLines = requestedLines.filter((n) => n <= lines.length);
+  // Every hit is past the end of the file: the file head is not this
+  // candidate's surroundings, and labelling it as such would only mislead.
+  if (validLines.length === 0) return { text: "", coveredLines: [] };
 
   const perHit = Math.max(1, Math.floor(maxLines / validLines.length));
   const half = Math.min(contextLines, Math.floor((perHit - 1) / 2));

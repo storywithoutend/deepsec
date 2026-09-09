@@ -166,6 +166,9 @@ describe("Sage candidate gate", () => {
       const content = "const a = 1;\nconst b = 2;";
       expect(extractSurroundingLines("", [1])).toBe("");
       expect(extractSurroundingLines(content, [])).toBe(content);
+      // Hits that no longer exist in the file yield no context at all rather
+      // than the unrelated head of the file.
+      expect(extractCandidateContext(content, [900])).toEqual({ text: "", coveredLines: [] });
     });
 
     it("buildCandidateGateContent includes snippet, surrounding context, and rule description", () => {
@@ -413,6 +416,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [realVulnCandidate],
+        fileContent: fileWithLines(),
         filePath: "src/api.ts",
         sageClient: mockSageClient as any,
       });
@@ -453,6 +457,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [borderlineCandidate],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -536,6 +541,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -612,6 +618,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -639,6 +646,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -730,6 +738,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -765,6 +774,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         threshold: 0.99,
         sageClient: mockSageClient as any,
       });
@@ -791,6 +801,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates,
+        fileContent: fileWithLines(),
         batchSize: 1,
         sageClient: mockSageClient as any,
       });
@@ -867,6 +878,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates,
+        fileContent: fileWithLines(),
         batchSize: 1,
         sageClient: mockSageClient as any,
       });
@@ -913,6 +925,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [realVuln, other],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -938,6 +951,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         sageClient: mockSageClient as any,
       });
 
@@ -1206,6 +1220,7 @@ describe("Sage candidate gate", () => {
 
       const result = await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         filePath: "src/huge.ts",
         sageClient: mockSageClient as any,
       });
