@@ -247,11 +247,11 @@ describe("processor with stub agent", () => {
             {
               ok: true,
               result: {
-                id: "plausible_vulnerability",
+                id: "benign_false_positive",
                 kind: "yesno",
                 result: r.content.includes("userInput")
-                  ? { answer: "yes", confidence: 0.95 }
-                  : { answer: "no", confidence: 0.92 },
+                  ? { answer: "no", confidence: 0.95 }
+                  : { answer: "yes", confidence: 0.92 },
               },
             },
           ],
@@ -267,12 +267,99 @@ describe("processor with stub agent", () => {
     });
 
     expect(result.candidatesFilteredBySage).toBe(1);
+    // The agent only sees the candidate the gate kept…
+    expect(stub.calls.investigateCalls).toHaveLength(1);
+    const investigatedRec = stub.calls.investigateCalls[0].batch[0];
+    expect(investigatedRec.candidates.map((c) => c.vulnSlug)).toEqual(["rce"]);
+    // …but the persisted scan results keep both candidates, so a later run
+    // without the gate can still investigate the filtered one.
     const updatedRec = fx.readRecord("app.ts");
-    expect(updatedRec.candidates).toHaveLength(1);
-    expect(updatedRec.candidates[0].vulnSlug).toBe("rce");
+    expect(updatedRec.candidates.map((c) => c.vulnSlug)).toEqual(["sql-injection", "rce"]);
 
     const meta = readRunMeta(fx.projectId, result.runId);
     expect(meta.stats.candidatesFilteredBySage).toBe(1);
+  });
+
+  it("process() skips a file entirely when the Sage gate filters all of its candidates", async () => {
+    const fx = setupProject({ files: ["app.ts"] });
+    fx.writeRecord(pendingRecord(fx.projectId, "app.ts"));
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+
+    const mockSageClient = {
+      decideBatch: vi.fn(async (req: any) => ({
+        results: req.requests.map(() => ({
+          answers: [
+            {
+              ok: true,
+              result: {
+                id: "benign_false_positive",
+                kind: "yesno",
+                result: { answer: "yes", confidence: 0.99 },
+              },
+            },
+          ],
+        })),
+      })),
+    };
+
+    const result = await processProject({
+      projectId: fx.projectId,
+      agentType: "stub",
+      sageGate: true,
+      sageClient: mockSageClient as any,
+    });
+
+    // No agent run at all — a zero-candidate record would otherwise be sent
+    // for an unbounded holistic review, costing more than skipping the gate.
+    expect(stub.calls.investigateCalls).toHaveLength(0);
+    expect(result.analysisCount).toBe(0);
+    expect(result.candidatesFilteredBySage).toBe(1);
+    expect(result.sageGateSkippedFiles).toBe(1);
+
+    // The claim is released rather than left locked until stale reclamation.
+    const rec = fx.readRecord("app.ts");
+    expect(rec.status).toBe("pending");
+    expect(rec.lockedByRunId).toBeUndefined();
+    expect(rec.candidates).toHaveLength(1);
+  });
+
+  it("process() reports Sage gate failures instead of silently filtering nothing", async () => {
+    const fx = setupProject({ files: ["app.ts"] });
+    fx.writeRecord(pendingRecord(fx.projectId, "app.ts"));
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+
+    const mockSageClient = {
+      decideBatch: vi.fn(async () => {
+        throw new Error("HTTP 401 invalid api key");
+      }),
+    };
+
+    const result = await processProject({
+      projectId: fx.projectId,
+      agentType: "stub",
+      sageGate: true,
+      sageClient: mockSageClient as any,
+    });
+
+    expect(result.candidatesFilteredBySage).toBe(0);
+    expect(result.sageGateErrors?.count).toBe(1);
+    expect(result.sageGateErrors?.messages.join(" ")).toContain("HTTP 401");
+    // Fail-open: the candidate is still investigated.
+    expect(stub.calls.investigateCalls).toHaveLength(1);
   });
 
   it("process() does NOT reclaim a record locked by a still-running other run", async () => {

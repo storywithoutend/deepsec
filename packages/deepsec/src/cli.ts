@@ -4,7 +4,7 @@ dotenvConfig({ path: ".env.local" });
 dotenvConfig(); // also load .env as fallback
 
 import { getRegistry } from "@deepsec/core";
-import { setAttributionVersion } from "@deepsec/processor";
+import { DEFAULT_SAGE_GATE_CONFIDENCE, setAttributionVersion } from "@deepsec/processor";
 import { Command } from "commander";
 import { collectRepeatable } from "./agent-config.js";
 import { enrichCommand } from "./commands/enrich.js";
@@ -354,7 +354,7 @@ program
   )
   .option(
     "--sage-gate-confidence <n>",
-    "Confidence threshold for Sage candidate gate (default: 0.85)",
+    `Confidence threshold for Sage candidate gate (default: ${DEFAULT_SAGE_GATE_CONFIDENCE})`,
     parseFloat,
   )
   .action(processCommand);

@@ -56,7 +56,7 @@ vi.mock("../preflight.js", () => ({
   assertSageCredential: vi.fn(),
 }));
 
-import { process as processRun } from "@deepsec/processor";
+import { DEFAULT_SAGE_GATE_CONFIDENCE, process as processRun } from "@deepsec/processor";
 import { processCommand } from "../commands/process.js";
 import { assertSageCredential } from "../preflight.js";
 
@@ -140,6 +140,36 @@ describe("processCommand --sage-gate flags and validation", () => {
     });
 
     expect(processRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("prints the default confidence threshold from the shared constant", async () => {
+    const logSpy = vi.spyOn(console, "log");
+    await processCommand({ projectId: "test-proj", sageGate: true });
+
+    const printed = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain(
+      `Sage candidate gate: enabled (confidence threshold: ${DEFAULT_SAGE_GATE_CONFIDENCE})`,
+    );
+  });
+
+  it("reports gate errors and skipped files in the run summary", async () => {
+    vi.mocked(processRun).mockResolvedValueOnce({
+      runId: "run-err",
+      analysisCount: 1,
+      findingCount: 0,
+      errorBatchCount: 0,
+      candidatesFilteredBySage: 0,
+      sageGateSkippedFiles: 2,
+      sageGateErrors: { count: 4, messages: ["HTTP 401 invalid api key"] },
+    } as never);
+    const logSpy = vi.spyOn(console, "log");
+
+    await processCommand({ projectId: "test-proj", sageGate: true });
+
+    const printed = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("Files skipped by Sage gate: 2");
+    expect(printed).toContain("Sage gate errors: 4");
+    expect(printed).toContain("HTTP 401 invalid api key");
   });
 
   it("supports --sage-gate in direct mode", async () => {

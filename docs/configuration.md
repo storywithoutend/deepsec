@@ -167,7 +167,7 @@ requires the complete access-token triple.
 | `AI_GATEWAY_API_KEY` | Gateway route | Optional long-lived alternative to linked-project OIDC. Expanded for the selected agent. |
 | `ANTHROPIC_AUTH_TOKEN` | `process`, `revalidate`, `triage` (Claude backend) | API token for the Claude Agent SDK. AI Gateway-issued or Anthropic-issued. Set this if you don't use `AI_GATEWAY_API_KEY`. |
 | `ANTHROPIC_BASE_URL` | same | Default (when `AI_GATEWAY_API_KEY` is set): `https://ai-gateway.vercel.sh`. Set to `https://api.anthropic.com` for direct Anthropic. |
-| `SAGE_API_KEY` | `triage --sage` | Levanto Sage API key. `LEVANTO_API_KEY` is accepted as an alias. Required for Sage triage even on the local-subscription route. |
+| `SAGE_API_KEY` | `triage --sage`, `process --sage-gate` | Levanto Sage API key. `LEVANTO_API_KEY` is accepted as an alias. Required for Sage triage even on the local-subscription route. |
 | `<ai.apiKeyEnv>` | Direct/custom route | User-chosen variable containing the provider credential. The name is stored in config; the value comes from `.env.local` or the process. |
 
 ### Optional

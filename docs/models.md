@@ -123,6 +123,31 @@ of failing. A non-retryable Sage error — bad key, exhausted quota, a
 rejected request — aborts the run rather than silently redirecting the
 whole corpus to Claude.
 
+## Sage candidate gate
+
+`process --sage-gate` puts the same Levanto Sage decision model in front
+of the coding agent: every scanner candidate is sent to Sage in `fast`
+latency mode with its snippet, surrounding context, and the matcher's
+rule description, and Sage answers one question — is this an obvious
+benign false positive? Candidates it calls benign are hidden from the
+agent's prompt, and a file left with no candidates is skipped entirely
+instead of being handed to the agent for an open-ended review.
+
+| Flag | Effect |
+|---|---|
+| `--sage-gate` | Filter obvious benign scanner candidates with Sage before agent runs. |
+| `--sage-gate-confidence <0-1>` | Confidence a "benign" answer needs before a candidate is dropped. Default: `0.85`. Requires `--sage-gate`. |
+
+The gate is fail-open and non-destructive. Anything other than a
+confident benign verdict — a plausible-vulnerability answer, a missing or
+below-threshold confidence, an unparseable answer, or an API error —
+keeps the candidate, and candidates the gate skipped are never deleted
+from the file record on disk, so a later run without `--sage-gate`
+investigates them normally. Candidates the gate could not evaluate are
+reported as `Sage gate errors` in the run summary so a gate that silently
+never ran doesn't read as "nothing was benign". `--sage-gate` needs
+`SAGE_API_KEY` or `LEVANTO_API_KEY`, same as Sage triage.
+
 ## Thinking level
 
 `process` and `revalidate` accept `--thinking-level` to control how much

@@ -112,15 +112,17 @@ describe("Sage candidate gate", () => {
         answer: "no",
         confidence: 0.92,
       });
-      expect(parseYesNoResult("yes")).toEqual({ answer: "yes", confidence: 1.0 });
-      expect(parseYesNoResult(false)).toEqual({ answer: "no", confidence: 1.0 });
+      // A bare payload carries no calibrated confidence: report none rather
+      // than synthesizing 1.0 and bypassing the caller's threshold.
+      expect(parseYesNoResult("yes")).toEqual({ answer: "yes", confidence: undefined });
+      expect(parseYesNoResult(false)).toEqual({ answer: "no", confidence: undefined });
       expect(parseYesNoResult(null)).toEqual({});
       expect(parseYesNoResult(undefined)).toEqual({});
     });
   });
 
   describe("benign filtering", () => {
-    it("filters out obvious benign candidates when Sage answers 'no' with confidence >= threshold", async () => {
+    it("filters out obvious benign candidates when Sage answers 'yes' with confidence >= threshold", async () => {
       const mockCandidate: CandidateMatch = {
         vulnSlug: "sql-injection",
         lineNumbers: [10],
@@ -139,9 +141,9 @@ describe("Sage candidate gate", () => {
                   {
                     ok: true,
                     result: {
-                      id: "plausible_vulnerability",
+                      id: "benign_false_positive",
                       kind: "yesno",
-                      result: { answer: "no", confidence: 0.95 },
+                      result: { answer: "yes", confidence: 0.95 },
                     },
                   },
                 ],
@@ -161,10 +163,11 @@ describe("Sage candidate gate", () => {
       expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(1);
       const firstGroup = capturedRequest.requests[0];
       expect(firstGroup.questions[0]).toEqual({
-        id: "plausible_vulnerability",
+        id: "benign_false_positive",
         kind: "yesno",
         instructions: SAGE_GATE_QUESTION_INSTRUCTIONS,
       });
+      expect(capturedRequest.latency_mode).toBe("fast");
       expect(firstGroup.content).toContain(mockCandidate.snippet);
       expect(firstGroup.content).toContain("sql-injection");
 
@@ -174,11 +177,11 @@ describe("Sage candidate gate", () => {
       expect(result.retainedCandidates).toHaveLength(0);
       expect(result.filteredCandidates).toEqual([mockCandidate]);
       expect(result.decisions[0].filtered).toBe(true);
-      expect(result.decisions[0].answer).toBe("no");
+      expect(result.decisions[0].answer).toBe("yes");
       expect(result.decisions[0].confidence).toBe(0.95);
     });
 
-    it("updates record.candidates in-place when filtering records", async () => {
+    it("reports retained candidates per file without mutating the record", async () => {
       const benignCandidate: CandidateMatch = {
         vulnSlug: "sql-injection",
         lineNumbers: [5],
@@ -195,9 +198,9 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
-                    result: { answer: "no", confidence: 0.9 },
+                    result: { answer: "yes", confidence: 0.9 },
                   },
                 },
               ],
@@ -212,12 +215,15 @@ describe("Sage candidate gate", () => {
       });
 
       expect(result.filteredCount).toBe(1);
-      expect(record.candidates).toHaveLength(0);
+      expect(result.retainedCandidatesByFile.get("src/queries.ts")).toEqual([]);
+      // Persisted scan state is untouched: a later run without the gate
+      // still sees the candidate.
+      expect(record.candidates).toEqual([benignCandidate]);
     });
   });
 
   describe("vulnerability retention", () => {
-    it("retains candidate when Sage answers 'yes' with high confidence", async () => {
+    it("retains candidate when Sage answers 'no' (vulnerability plausible) with high confidence", async () => {
       const realVulnCandidate: CandidateMatch = {
         vulnSlug: "sql-injection",
         lineNumbers: [12],
@@ -233,9 +239,9 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
-                    result: { answer: "yes", confidence: 0.98 },
+                    result: { answer: "no", confidence: 0.98 },
                   },
                 },
               ],
@@ -254,10 +260,10 @@ describe("Sage candidate gate", () => {
       expect(result.retainedCount).toBe(1);
       expect(result.retainedCandidates).toEqual([realVulnCandidate]);
       expect(result.decisions[0].filtered).toBe(false);
-      expect(result.decisions[0].answer).toBe("yes");
+      expect(result.decisions[0].answer).toBe("no");
     });
 
-    it("retains candidate when Sage answers 'yes' with low confidence", async () => {
+    it("retains candidate when Sage calls it benign with low confidence", async () => {
       const borderlineCandidate: CandidateMatch = {
         vulnSlug: "open-redirect",
         lineNumbers: [25],
@@ -273,7 +279,7 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
                     result: { answer: "yes", confidence: 0.55 },
                   },
@@ -317,9 +323,9 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
-                    result: { answer: "no", confidence: 0.85 },
+                    result: { answer: "yes", confidence: 0.85 },
                   },
                 },
               ],
@@ -355,9 +361,9 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
-                    result: { answer: "no", confidence: 0.849 },
+                    result: { answer: "yes", confidence: 0.849 },
                   },
                 },
               ],
@@ -394,9 +400,9 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
-                    result: { answer: "no", confidence: 0.88 },
+                    result: { answer: "yes", confidence: 0.88 },
                   },
                 },
               ],
@@ -505,9 +511,9 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
-                    result: { answer: "no", confidence: 0.92 },
+                    result: { answer: "yes", confidence: 0.92 },
                   },
                 },
               ],
@@ -526,6 +532,8 @@ describe("Sage candidate gate", () => {
       expect(result.retainedCount).toBe(1);
       expect(result.retainedCandidates).toEqual([c1]);
       expect(result.filteredCandidates).toEqual([c2]);
+      expect(result.errorCount).toBe(1);
+      expect(result.errors).toEqual(["model timeout on this question"]);
     });
 
     it("fails open when answer format is unrecognized or null", async () => {
@@ -544,7 +552,7 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
                     result: { answer: "maybe", confidence: 0.99 },
                   },
@@ -560,10 +568,46 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
-      // "maybe" is not "no" -> retained
+      // "maybe" is not "yes" -> retained
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCount).toBe(1);
       expect(result.decisions[0].filtered).toBe(false);
+    });
+
+    it("retains a candidate whose benign verdict carries no confidence", async () => {
+      const candidate: CandidateMatch = {
+        vulnSlug: "sql-injection",
+        lineNumbers: [1],
+        snippet: "const q = 'SELECT 1';",
+        matchedPattern: "SELECT",
+      };
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  // Bare payload: an answer with no calibrated confidence.
+                  result: { id: "benign_false_positive", kind: "yesno", result: "yes" },
+                },
+              ],
+            },
+          ],
+        })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates: [candidate],
+        threshold: 0.99,
+        sageClient: mockSageClient as any,
+      });
+
+      expect(result.decisions[0].answer).toBe("yes");
+      expect(result.decisions[0].confidence).toBeUndefined();
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidates).toEqual([candidate]);
     });
 
     it("works with single decide API and fails open on single decide error", async () => {
@@ -635,7 +679,7 @@ describe("Sage candidate gate", () => {
                   {
                     ok: true,
                     result: {
-                      id: "plausible_vulnerability",
+                      id: "benign_false_positive",
                       kind: "yesno",
                       result: { answer: "yes", confidence: 0.9 },
                     },
@@ -678,7 +722,7 @@ describe("Sage candidate gate", () => {
                   {
                     ok: true,
                     result: {
-                      id: "plausible_vulnerability",
+                      id: "benign_false_positive",
                       kind: "yesno",
                       result: { answer: "yes", confidence: 0.9 },
                     },
@@ -696,7 +740,9 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
-      expect(capturedContent).toContain("Candidate Match Snippet:\n```\nelement.innerHTML = untrusted;");
+      expect(capturedContent).toContain(
+        "Candidate Match Snippet:\n```\nelement.innerHTML = untrusted;",
+      );
     });
 
     it("accepts custom ruleDescriptions map or resolver function", async () => {
@@ -718,7 +764,7 @@ describe("Sage candidate gate", () => {
                   {
                     ok: true,
                     result: {
-                      id: "plausible_vulnerability",
+                      id: "benign_false_positive",
                       kind: "yesno",
                       result: { answer: "no", confidence: 0.9 },
                     },
@@ -743,7 +789,7 @@ describe("Sage candidate gate", () => {
   });
 
   describe("multi-candidate and progress reporting", () => {
-    it("processes mixed candidates across multiple files and updates records", async () => {
+    it("processes mixed candidates across multiple files and reports them per file", async () => {
       const benignCand1: CandidateMatch = {
         vulnSlug: "sql-injection",
         lineNumbers: [1],
@@ -775,11 +821,11 @@ describe("Sage candidate gate", () => {
                 {
                   ok: true,
                   result: {
-                    id: "plausible_vulnerability",
+                    id: "benign_false_positive",
                     kind: "yesno",
                     result: isReal
-                      ? { answer: "yes", confidence: 0.95 }
-                      : { answer: "no", confidence: 0.92 },
+                      ? { answer: "no", confidence: 0.95 }
+                      : { answer: "yes", confidence: 0.92 },
                   },
                 },
               ],
@@ -802,10 +848,12 @@ describe("Sage candidate gate", () => {
       expect(result.retainedCount).toBe(1);
       expect(result.retainedCandidates).toEqual([realCand]);
 
-      // Record 1 candidates updated: only realCand remains
-      expect(record1.candidates).toEqual([realCand]);
-      // Record 2 candidates updated: empty
-      expect(record2.candidates).toHaveLength(0);
+      // Only the retained view narrows: record 1 keeps realCand, record 2 keeps nothing
+      expect(result.retainedCandidatesByFile.get("file1.ts")).toEqual([realCand]);
+      expect(result.retainedCandidatesByFile.get("file2.ts")).toEqual([]);
+      // Both records still carry every scanner candidate
+      expect(record1.candidates).toEqual([benignCand1, realCand]);
+      expect(record2.candidates).toEqual([benignCand2]);
 
       expect(progressMessage).toContain("Filtered 2 candidate(s)");
     });

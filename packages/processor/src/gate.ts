@@ -12,7 +12,9 @@ import {
 export const DEFAULT_SAGE_GATE_CONFIDENCE = 0.85;
 
 export const SAGE_GATE_QUESTION_INSTRUCTIONS =
-  "Does this code snippet plausibly introduce the specified vulnerability, or is it an obvious benign false positive?";
+  "Is this code snippet an obvious benign false positive for the specified vulnerability? Answer yes only when the snippet clearly cannot introduce it. Answer no if the vulnerability is plausible or you are unsure.";
+
+const GATE_QUESTION_ID = "benign_false_positive";
 
 let cachedRegistry: ReturnType<typeof createDefaultRegistry> | undefined;
 
@@ -117,11 +119,11 @@ export function parseYesNoResult(raw: unknown): { answer?: string; confidence?: 
   }
 
   if (typeof raw === "string") {
-    return { answer: raw.trim().toLowerCase(), confidence: 1.0 };
+    return { answer: raw.trim().toLowerCase() };
   }
 
   if (typeof raw === "boolean") {
-    return { answer: raw ? "yes" : "no", confidence: 1.0 };
+    return { answer: raw ? "yes" : "no" };
   }
 
   return {};
@@ -155,9 +157,19 @@ export interface FilterCandidatesResult {
   candidates: CandidateMatch[];
   retainedCandidates: CandidateMatch[];
   filteredCandidates: CandidateMatch[];
+  /**
+   * Per-file retained candidates, keyed by `FileRecord.filePath`. The gate
+   * never mutates the records it was given — persisted scan results stay
+   * intact — so callers use this view to decide what the agent sees.
+   */
+  retainedCandidatesByFile: Map<string, CandidateMatch[]>;
   filteredCount: number;
   retainedCount: number;
   totalCandidates: number;
+  /** Candidates whose evaluation failed and were retained fail-open. */
+  errorCount: number;
+  /** Distinct failure messages behind `errorCount`, in first-seen order. */
+  errors: string[];
   decisions: CandidateGateDecision[];
 }
 
@@ -165,10 +177,10 @@ const GATE_BATCH_SIZE = 30;
 
 /**
  * Filter candidate matches using Levanto Sage decision model (kind: "yesno").
- * Candidates where Sage answers 'no' with confidence >= threshold are filtered out
- * as benign false positives.
- * Any answer of 'yes', low confidence (< threshold), or API/network error retains
- * the candidate (fail-open / fail-safe).
+ * The question is single-clause — "is this an obvious benign false positive?" —
+ * so only an explicit 'yes' with confidence >= threshold filters a candidate out.
+ * Any answer of 'no', an unparseable answer, a missing/low confidence, or an
+ * API/network error retains the candidate (fail-open / fail-safe).
  */
 export async function filterCandidatesWithSage(
   params: FilterCandidatesParams,
@@ -280,9 +292,12 @@ export async function filterCandidatesWithSage(
       candidates: [],
       retainedCandidates: [],
       filteredCandidates: [],
+      retainedCandidatesByFile: new Map(),
       filteredCount: 0,
       retainedCount: 0,
       totalCandidates: 0,
+      errorCount: 0,
+      errors: [],
       decisions: [],
     };
   }
@@ -300,7 +315,7 @@ export async function filterCandidatesWithSage(
           content: item.content,
           questions: [
             {
-              id: "plausible_vulnerability",
+              id: GATE_QUESTION_ID,
               kind: "yesno" as const,
               instructions: SAGE_GATE_QUESTION_INSTRUCTIONS,
             },
@@ -308,6 +323,7 @@ export async function filterCandidatesWithSage(
         }));
 
         const batchResponse = await sageClient.decideBatch({
+          latency_mode: "fast",
           requests,
         });
 
@@ -315,7 +331,7 @@ export async function filterCandidatesWithSage(
           const item = chunk[j];
           const groupResult = batchResponse?.results?.[j];
           const answer =
-            groupResult?.answers?.find((a) => a.ok && a.result?.id === "plausible_vulnerability") ??
+            groupResult?.answers?.find((a) => a.ok && a.result?.id === GATE_QUESTION_ID) ??
             groupResult?.answers?.[0];
 
           if (!answer || !answer.ok) {
@@ -332,10 +348,10 @@ export async function filterCandidatesWithSage(
           const rawResult = (answer.result?.result ?? answer.result) as unknown;
           const { answer: ans, confidence } = parseYesNoResult(rawResult);
 
-          const isNo = ans === "no";
+          const isBenign = ans === "yes";
           const isHighConfidence =
             typeof confidence === "number" && !Number.isNaN(confidence) && confidence >= threshold;
-          const filtered = isNo && isHighConfidence;
+          const filtered = isBenign && isHighConfidence;
 
           decisions.push({
             candidate: item.candidate,
@@ -361,7 +377,7 @@ export async function filterCandidatesWithSage(
       for (const item of chunk) {
         try {
           const question: SageYesNoQuestion = {
-            id: "plausible_vulnerability",
+            id: GATE_QUESTION_ID,
             kind: "yesno",
             instructions: SAGE_GATE_QUESTION_INSTRUCTIONS,
           };
@@ -372,10 +388,10 @@ export async function filterCandidatesWithSage(
           const rawResult = (res?.result ?? res) as unknown;
           const { answer: ans, confidence } = parseYesNoResult(rawResult);
 
-          const isNo = ans === "no";
+          const isBenign = ans === "yes";
           const isHighConfidence =
             typeof confidence === "number" && !Number.isNaN(confidence) && confidence >= threshold;
-          const filtered = isNo && isHighConfidence;
+          const filtered = isBenign && isHighConfidence;
 
           decisions.push({
             candidate: item.candidate,
@@ -411,16 +427,30 @@ export async function filterCandidatesWithSage(
     decisionMap.set(d.candidate, d);
   }
 
-  // If records were passed, update record.candidates in-place to exclude filtered matches
+  // The gate is advisory only: `record.candidates` is persisted scan state, so
+  // filtered matches are reported per file rather than deleted from the record.
+  const retainedCandidatesByFile = new Map<string, CandidateMatch[]>();
+  const collectRetained = (filePath: string, candidates: CandidateMatch[]) => {
+    const retained = candidates.filter((c) => {
+      const d = decisionMap.get(c);
+      return !d || !d.filtered;
+    });
+    retainedCandidatesByFile.set(filePath, retained);
+  };
   if (params.records) {
     for (const record of params.records) {
-      if (!record.candidates) continue;
-      record.candidates = record.candidates.filter((c) => {
-        const d = decisionMap.get(c);
-        return !d || !d.filtered;
-      });
+      if (!record.candidates || record.candidates.length === 0) continue;
+      collectRetained(record.filePath, record.candidates);
     }
+  } else if (params.candidates && params.filePath) {
+    collectRetained(params.filePath, params.candidates);
   }
+
+  const errors: string[] = [];
+  for (const d of decisions) {
+    if (d.error && !errors.includes(d.error)) errors.push(d.error);
+  }
+  const errorCount = decisions.filter((d) => d.error).length;
 
   const filteredCount = decisions.filter((d) => d.filtered).length;
   const retainedCount = decisions.length - filteredCount;
@@ -439,9 +469,12 @@ export async function filterCandidatesWithSage(
     candidates: retainedCandidates,
     retainedCandidates,
     filteredCandidates,
+    retainedCandidatesByFile,
     filteredCount,
     retainedCount,
     totalCandidates: decisions.length,
+    errorCount,
+    errors,
     decisions,
   };
 }

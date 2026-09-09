@@ -1,14 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureProject, readProjectConfig } from "@deepsec/core";
-import { process as processRun } from "@deepsec/processor";
+import { DEFAULT_SAGE_GATE_CONFIDENCE, process as processRun } from "@deepsec/processor";
 import { scanFiles } from "@deepsec/scanner";
 import { buildAgentConfig } from "../agent-config.js";
 import { defaultModelForAgent } from "../agent-defaults.js";
 import { resolveFiles } from "../file-sources.js";
 import { BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW } from "../formatters.js";
 import { renderPrComment } from "../pr-comment.js";
-import { applyConfiguredModelRoute, assertAgentCredential, assertSageCredential } from "../preflight.js";
+import {
+  applyConfiguredModelRoute,
+  assertAgentCredential,
+  assertSageCredential,
+} from "../preflight.js";
 import { renderQuotaMessage } from "../quota-message.js";
 import { resolveAgentType } from "../resolve-agent-type.js";
 import { resolveProjectId, resolveProjectIdForDirect } from "../resolve-project-id.js";
@@ -126,7 +130,7 @@ export async function processCommand(opts: {
   return processStandardMode(opts);
 }
 
-async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
+function assertSageGateOptions(opts: { sageGate?: boolean; sageGateConfidence?: number }): void {
   if (opts.sageGateConfidence !== undefined && !opts.sageGate) {
     throw new Error("--sage-gate-confidence requires --sage-gate");
   }
@@ -143,6 +147,10 @@ async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
   if (opts.sageGate) {
     assertSageCredential();
   }
+}
+
+async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
+  assertSageGateOptions(opts);
 
   const projectId = resolveProjectId(opts.projectId);
   const onlySlugs = parseCsv(opts.onlySlugs);
@@ -191,7 +199,7 @@ async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
   if (onlySlugs) console.log(`  Only slugs: ${onlySlugs.join(", ")}`);
   if (skipSlugs) console.log(`  Skip slugs: ${skipSlugs.join(", ")}`);
   if (opts.sageGate) {
-    const conf = opts.sageGateConfidence ?? 0.85;
+    const conf = opts.sageGateConfidence ?? DEFAULT_SAGE_GATE_CONFIDENCE;
     console.log(`  Sage candidate gate: enabled (confidence threshold: ${conf})`);
   }
   console.log();
@@ -220,6 +228,14 @@ async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
   console.log(`  Findings: ${result.findingCount}`);
   if (result.candidatesFilteredBySage !== undefined) {
     console.log(`  Candidates filtered by Sage: ${result.candidatesFilteredBySage}`);
+  }
+  if (result.sageGateSkippedFiles) {
+    console.log(`  Files skipped by Sage gate: ${result.sageGateSkippedFiles}`);
+  }
+  if (result.sageGateErrors) {
+    console.log(
+      `  ${YELLOW}Sage gate errors: ${result.sageGateErrors.count} candidate(s) not evaluated and kept — ${result.sageGateErrors.messages.join("; ")}${RESET}`,
+    );
   }
   if (result.errorBatchCount > 0) {
     console.log(`  ${RED}Errored batches: ${result.errorBatchCount}${RESET}`);
@@ -285,22 +301,7 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
     throw new Error(`Conflicting file sources: ${sources.join(", ")}. Pick exactly one.`);
   }
 
-  if (opts.sageGateConfidence !== undefined && !opts.sageGate) {
-    throw new Error("--sage-gate-confidence requires --sage-gate");
-  }
-  if (opts.sageGateConfidence !== undefined) {
-    if (
-      Number.isNaN(opts.sageGateConfidence) ||
-      opts.sageGateConfidence < 0 ||
-      opts.sageGateConfidence > 1
-    ) {
-      throw new Error("--sage-gate-confidence must be a number between 0 and 1");
-    }
-  }
-
-  if (opts.sageGate) {
-    assertSageCredential();
-  }
+  assertSageGateOptions(opts);
 
   // Warn-and-ignore options that don't apply in direct mode. The user's
   // file list IS the filter — these flags would silently subset it
@@ -351,7 +352,7 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
   console.log(`  Agent: ${agentType} (${model})`);
   console.log(`  Root: ${rootPath}`);
   if (opts.sageGate) {
-    const conf = opts.sageGateConfidence ?? 0.85;
+    const conf = opts.sageGateConfidence ?? DEFAULT_SAGE_GATE_CONFIDENCE;
     console.log(`  Sage candidate gate: enabled (confidence threshold: ${conf})`);
   }
   console.log();
@@ -397,6 +398,14 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
   console.log(`  Findings: ${result.findingCount}`);
   if (result.candidatesFilteredBySage !== undefined) {
     console.log(`  Candidates filtered by Sage: ${result.candidatesFilteredBySage}`);
+  }
+  if (result.sageGateSkippedFiles) {
+    console.log(`  Files skipped by Sage gate: ${result.sageGateSkippedFiles}`);
+  }
+  if (result.sageGateErrors) {
+    console.log(
+      `  ${YELLOW}Sage gate errors: ${result.sageGateErrors.count} candidate(s) not evaluated and kept — ${result.sageGateErrors.messages.join("; ")}${RESET}`,
+    );
   }
   if (result.errorBatchCount > 0) {
     console.log(`  ${RED}Errored batches: ${result.errorBatchCount}${RESET}`);
