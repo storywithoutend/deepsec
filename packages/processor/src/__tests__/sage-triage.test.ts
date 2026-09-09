@@ -1138,6 +1138,69 @@ describe("Sage Triage", () => {
       });
     }
 
+    it("falls back to Claude when Sage returns fewer results than findings", async () => {
+      writeOneFinding("src/first.ts", "First finding");
+      writeOneFinding("src/second.ts", "Second finding");
+
+      vi.mocked(query).mockImplementation(async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify([
+            {
+              title: "First finding",
+              priority: "P0",
+              exploitability: "trivial",
+              impact: "critical",
+              reasoning: "Claude fallback verdict",
+            },
+            {
+              title: "Second finding",
+              priority: "P2",
+              exploitability: "difficult",
+              impact: "low",
+              reasoning: "Claude fallback verdict",
+            },
+          ]),
+        } as any;
+      } as any);
+
+      // One group result for two findings: binding by position would persist
+      // the first finding's verdict onto the second.
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "priority",
+                    kind: "choice",
+                    result: { chosen: "P2", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+          ],
+        })),
+      } as unknown as LevantoSageClient;
+
+      const result = await triage({
+        projectId,
+        severity: "MEDIUM",
+        provider: "sage",
+        fallbackToClaude: true,
+        sageClient: mockSageClient,
+      });
+
+      expect(result).toEqual({ triaged: 2, p0: 1, p1: 0, p2: 1, skip: 0 });
+      for (const record of loadAllFileRecords(projectId)) {
+        // Nothing was attributed to Sage off a mis-bound result.
+        expect(record.findings[0].triage?.model).not.toBe("levanto-sage-v0.8");
+      }
+    });
+
     it("still falls back to Claude on a transient Sage error", async () => {
       writeOneFinding("src/transient.ts", "Transient finding");
 

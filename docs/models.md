@@ -142,7 +142,8 @@ instead of being handed to the agent for an open-ended review.
 The gate is fail-open and non-destructive. Anything other than a
 confident benign verdict — a plausible-vulnerability answer, a missing or
 below-threshold confidence, an unparseable answer, or an API error —
-keeps the candidate, and the gate never deletes candidates from the file
+keeps the candidate, as does a verdict formed from a context window that
+could not fit every one of the candidate's matched lines, and the gate never deletes candidates from the file
 record on disk. Candidates the gate could not evaluate are reported as
 `Sage gate errors` in the run summary so a gate that silently never ran
 doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`

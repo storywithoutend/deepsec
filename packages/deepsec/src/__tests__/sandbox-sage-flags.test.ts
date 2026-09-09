@@ -38,9 +38,15 @@ describe("sandbox Sage flag guard", () => {
     expect(stderr).toContain("not supported in sandbox mode");
   });
 
-  it("rejects --provider sage but not --provider claude", () => {
+  it("rejects --provider sage in both spaced and inline forms", () => {
     expect(runGuard(["--provider", "sage"]).exited).toBe(true);
+    expect(runGuard(["--provider=sage"]).exited).toBe(true);
     expect(runGuard(["--provider", "claude"]).exited).toBe(false);
+    expect(runGuard(["--provider=claude"]).exited).toBe(false);
+  });
+
+  it("rejects a repeated --provider whose last value is sage", () => {
+    expect(runGuard(["--provider", "claude", "--provider", "sage"]).exited).toBe(true);
   });
 
   it("lets non-Sage passthrough flags through", () => {

@@ -960,6 +960,56 @@ describe("Sage candidate gate", () => {
       }
     });
 
+    it("retains a candidate whose hits did not all fit the context window", async () => {
+      const filePath = "src/partial.ts";
+      const fullPath = path.join(tmpDir, filePath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(
+        fullPath,
+        `${Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
+      );
+
+      const candidate: CandidateMatch = {
+        vulnSlug: "crypto-usage",
+        lineNumbers: Array.from({ length: 40 }, (_, i) => 20 + i * 40),
+        snippet: "line 20",
+        matchedPattern: "crypto",
+      };
+      const record = createTestRecord(filePath, [candidate]);
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "benign_false_positive",
+                    kind: "yesno",
+                    result: { answer: "yes", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+          ],
+        })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        records: [record],
+        rootPath: tmpDir,
+        sageClient: mockSageClient as any,
+      });
+
+      // Sage was confident the part it saw is benign, but it never saw the
+      // remaining hits — dropping the candidate would hide them from the agent.
+      expect(result.decisions[0].answer).toBe("yes");
+      expect(result.decisions[0].confidence).toBe(0.99);
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
+    });
+
     it("falls back to candidate snippet when file does not exist on disk", async () => {
       const candidate: CandidateMatch = {
         vulnSlug: "xss",

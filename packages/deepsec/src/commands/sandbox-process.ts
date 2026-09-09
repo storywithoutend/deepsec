@@ -41,6 +41,11 @@ function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
 
+function splitFlag(arg: string): [name: string, inlineValue: string | undefined] {
+  const eq = arg.indexOf("=");
+  return eq === -1 ? [arg, undefined] : [arg.slice(0, eq), arg.slice(eq + 1)];
+}
+
 const SAGE_ONLY_FLAGS = [
   "--sage-gate",
   "--sage-gate-confidence",
@@ -57,11 +62,18 @@ const SAGE_ONLY_FLAGS = [
  * flags would fail every worker at preflight after provisioning.
  */
 export function assertNoSageFlags(args: string[]): void {
-  const flag = args.find((a) => {
-    const name = a.split("=", 1)[0];
-    if (SAGE_ONLY_FLAGS.includes(name)) return true;
-    return name === "--provider" && args[args.indexOf(a) + 1] === "sage";
-  });
+  let flag: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const [name, inlineValue] = splitFlag(args[i]);
+    if (SAGE_ONLY_FLAGS.includes(name)) {
+      flag = args[i];
+      break;
+    }
+    if (name === "--provider" && (inlineValue ?? args[i + 1]) === "sage") {
+      flag = args[i];
+      break;
+    }
+  }
   if (!flag) return;
   const subject = flag.startsWith("--sage-gate") ? "Sage candidate gate" : "Sage triage";
   console.error(

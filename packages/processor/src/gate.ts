@@ -274,6 +274,8 @@ export async function filterCandidatesWithSage(
     candidate: CandidateMatch;
     filePath?: string;
     content: string;
+    /** True when the context cap kept some of the candidate's hits out of `content`. */
+    partialContext: boolean;
   }
 
   const items: ItemToEvaluate[] = [];
@@ -297,10 +299,12 @@ export async function filterCandidatesWithSage(
       for (const candidate of record.candidates) {
         let surroundingContext: string | undefined;
         let contextLineNumbers = candidate.lineNumbers;
+        let partialContext = false;
         if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
           const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
           surroundingContext = extracted.text;
           contextLineNumbers = extracted.coveredLines;
+          partialContext = extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
         }
 
         const ruleDesc = resolveDescription(candidate.vulnSlug);
@@ -317,6 +321,7 @@ export async function filterCandidatesWithSage(
           candidate,
           filePath: record.filePath,
           content,
+          partialContext,
         });
       }
     }
@@ -336,10 +341,12 @@ export async function filterCandidatesWithSage(
     for (const candidate of params.candidates) {
       let surroundingContext: string | undefined;
       let contextLineNumbers = candidate.lineNumbers;
+      let partialContext = false;
       if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
         const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
         surroundingContext = extracted.text;
         contextLineNumbers = extracted.coveredLines;
+        partialContext = extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
       }
 
       const ruleDesc = resolveDescription(candidate.vulnSlug);
@@ -356,6 +363,7 @@ export async function filterCandidatesWithSage(
         candidate,
         filePath: params.filePath,
         content,
+        partialContext,
       });
     }
   }
@@ -385,10 +393,12 @@ export async function filterCandidatesWithSage(
     const isBenign = answer === "yes";
     const isHighConfidence =
       typeof confidence === "number" && !Number.isNaN(confidence) && confidence >= threshold;
+    // A benign verdict formed from part of a candidate says nothing about the
+    // hits that never left the machine, so partial coverage always retains.
     decisions.push({
       candidate: item.candidate,
       filePath: item.filePath,
-      filtered: isBenign && isHighConfidence,
+      filtered: isBenign && isHighConfidence && !item.partialContext,
       answer,
       confidence,
     });

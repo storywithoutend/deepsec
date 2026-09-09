@@ -228,10 +228,12 @@ function parseRetryAfterMs(header: string | null): number | undefined {
 /**
  * The single source of truth for which Sage failures are worth another
  * round trip: 5xx, 429, 408 and 425. Everything else — 400/401/402/403
- * and any other non-2xx status — is deterministic, so callers can treat
- * "not retryable" as "permanent for this run". Network and timeout
- * failures are normalized to `LevantoSageServerError`, so they stay
- * retryable.
+ * and any other non-2xx status — is deterministic and surfaces to the
+ * caller immediately. "Not retryable" does NOT mean "fatal for the run":
+ * a rejected or oversized payload only dooms that one request, so use
+ * `isRunWideSageError` to decide whether to stop calling. Network and
+ * timeout failures are normalized to `LevantoSageServerError`, so they
+ * stay retryable.
  */
 export function isRetryableSageError(
   err: unknown,
@@ -384,7 +386,8 @@ export class LevantoSageClient {
       } catch (err) {
         // Only transient failures (5xx, 429, 408, 425) and network/timeout errors
         // are worth another round trip; every other Sage error (400/401/402/403
-        // and any other non-2xx status) is deterministic and surfaces immediately.
+        // and any other non-2xx status) is deterministic for this request and
+        // surfaces immediately, leaving the scope decision to the caller.
         if (err instanceof LevantoSageError && !isRetryableSageError(err)) {
           throw err;
         }

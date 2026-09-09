@@ -503,6 +503,16 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
       const sageModel =
         typeof batchResponse.meta?.model === "string" ? batchResponse.meta.model : SAGE_MODEL_NAME;
 
+      // Group results are bound to requests by position only. A response of a
+      // different length means we cannot tell which verdict belongs to which
+      // finding, and mis-binding one would persist a confident verdict onto the
+      // wrong finding — fail the whole batch into the existing fallback path.
+      if (batchResponse.results?.length !== batch.length) {
+        throw new Error(
+          `Levanto Sage returned ${batchResponse.results?.length ?? 0} result(s) for ${batch.length} finding(s)`,
+        );
+      }
+
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         const groupResult = batchResponse.results?.[i];
