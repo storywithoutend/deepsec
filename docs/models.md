@@ -145,7 +145,9 @@ keeps the candidate, and the gate never deletes candidates from the file
 record on disk. Candidates the gate could not evaluate are reported as
 `Sage gate errors` in the run summary so a gate that silently never ran
 doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`
-or `LEVANTO_API_KEY`, same as Sage triage.
+or `LEVANTO_API_KEY`, same as Sage triage, and runs orchestrator-side only:
+`deepsec sandbox process` rejects the flag rather than forwarding it into
+microVMs that have neither the credential nor egress to Sage.
 
 What that means across runs depends on whether the gate cleared the whole
 file:

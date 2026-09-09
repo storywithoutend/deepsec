@@ -42,6 +42,23 @@ function hasFlag(args: string[], flag: string): boolean {
 }
 
 /**
+ * The Sage candidate gate runs orchestrator-side only: sandboxes get neither
+ * a Sage credential nor egress to the Sage host, so forwarding the flag would
+ * fail every worker at preflight after provisioning.
+ */
+export function assertNoSageGateFlag(args: string[]): void {
+  const flag = args.find((a) => a === "--sage-gate" || a.startsWith("--sage-gate-confidence"));
+  if (!flag) return;
+  console.error(
+    `${flag} is not supported in sandbox mode — the Sage candidate gate runs orchestrator-side only.`,
+  );
+  console.error(
+    "Run `deepsec process --sage-gate` locally, or drop the flag to sandbox the agent runs.",
+  );
+  process.exit(1);
+}
+
+/**
  * Extract `--reinvestigate` in its optional-arg form. Returns:
  *   undefined — flag not present
  *   true      — flag present with no value (bare)
@@ -144,6 +161,8 @@ export async function sandboxCommand(subcommand: string, opts: SandboxOpts) {
     console.error(`Valid commands: ${VALID_COMMANDS.join(", ")}, collect, status`);
     process.exit(1);
   }
+
+  assertNoSageGateFlag(opts.args ?? []);
 
   const projectId = resolveProjectId(opts.projectId);
   const config = buildConfig(subcommand as SandboxSubcommand, projectId, opts);

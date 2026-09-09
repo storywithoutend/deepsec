@@ -8,11 +8,17 @@ import {
   DEFAULT_SAGE_GATE_CONFIDENCE,
   extractSurroundingLines,
   filterCandidatesWithSage,
+  GATE_BLOCK_CHAR_LIMIT,
+  GATE_CONTEXT_LINE_LIMIT,
   getRuleDescription,
   parseYesNoResult,
   SAGE_GATE_QUESTION_INSTRUCTIONS,
 } from "../gate.js";
-import { LevantoSageAuthError, LevantoSageServerError } from "../sage/client.js";
+import {
+  LevantoSageAuthError,
+  LevantoSageServerError,
+  LevantoSageValidationError,
+} from "../sage/client.js";
 
 function createTestRecord(filePath: string, candidates: CandidateMatch[] = []): FileRecord {
   return {
@@ -47,6 +53,30 @@ describe("Sage candidate gate", () => {
       const content = "line 1\nline 2\nline 3\nline 4\nline 5";
       const context = extractSurroundingLines(content, [1], 5);
       expect(context).toBe(content);
+    });
+
+    it("extractSurroundingLines caps the window when matches span the whole file", () => {
+      const content = Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join("\n");
+      // One candidate carrying every hit in the file — matchers commonly do this.
+      const extracted = extractSurroundingLines(content, [12, 45, 300, 1180]);
+
+      const extractedLines = extracted.split("\n");
+      expect(extractedLines.length).toBeLessThanOrEqual(GATE_CONTEXT_LINE_LIMIT);
+      // Anchored on the first match, not stretched to the last one.
+      expect(extracted).toContain("line 12");
+      expect(extracted).not.toContain("line 1180");
+    });
+
+    it("buildCandidateGateContent truncates oversized code blocks", () => {
+      const huge = "x".repeat(GATE_BLOCK_CHAR_LIMIT * 3);
+      const content = buildCandidateGateContent({
+        snippet: huge,
+        surroundingContext: `${huge}-context`,
+        vulnSlug: "rce",
+      });
+
+      expect(content).toContain("… (truncated)");
+      expect(content.length).toBeLessThan(GATE_BLOCK_CHAR_LIMIT * 3);
     });
 
     it("extractSurroundingLines handles empty or missing line numbers", () => {
@@ -639,6 +669,52 @@ describe("Sage candidate gate", () => {
       expect(result.errors).toEqual(["API key required or invalid."]);
     });
 
+    it("keeps calling Sage after a request-scoped rejection", async () => {
+      const candidates: CandidateMatch[] = [1, 2, 3].map((n) => ({
+        vulnSlug: "rce",
+        lineNumbers: [n],
+        snippet: `exec${n}()`,
+        matchedPattern: "exec",
+      }));
+
+      let call = 0;
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => {
+          call++;
+          if (call === 1) {
+            // 400 / oversized payload: this request is doomed, the next is not.
+            throw new LevantoSageValidationError("request payload rejected");
+          }
+          return {
+            results: [
+              {
+                answers: [
+                  {
+                    ok: true,
+                    result: {
+                      id: "benign_false_positive",
+                      kind: "yesno",
+                      result: { answer: "yes", confidence: 0.99 },
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates,
+        batchSize: 1,
+        sageClient: mockSageClient as any,
+      });
+
+      expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(3);
+      expect(result.errorCount).toBe(1);
+      expect(result.filteredCount).toBe(2);
+    });
+
     it("keeps calling Sage after a retryable error", async () => {
       const candidates: CandidateMatch[] = [1, 2].map((n) => ({
         vulnSlug: "xss",
@@ -955,7 +1031,7 @@ describe("Sage candidate gate", () => {
       expect(record1.candidates).toEqual([benignCand1, realCand]);
       expect(record2.candidates).toEqual([benignCand2]);
 
-      expect(progressMessage).toContain("Filtered 2 candidate(s)");
+      expect(progressMessage).toContain("3/3 candidate(s) evaluated (2 filtered so far)");
     });
 
     it("emits progress at the start and after each chunk", async () => {

@@ -4,13 +4,20 @@ import type { CandidateMatch, FileRecord } from "@deepsec/core";
 import { getRegistry } from "@deepsec/core";
 import { createDefaultRegistry } from "@deepsec/scanner";
 import {
-  isPermanentSageError,
+  LevantoSageAuthError,
   LevantoSageClient,
+  LevantoSageQuotaError,
   type SageBatchRequestGroup,
   type SageYesNoQuestion,
 } from "./sage/index.js";
 
 export const DEFAULT_SAGE_GATE_CONFIDENCE = 0.85;
+
+/** Hard cap on the context window handed to Sage for one candidate. */
+export const GATE_CONTEXT_LINE_LIMIT = 60;
+
+/** Hard cap on each code block embedded in a candidate's gate content. */
+export const GATE_BLOCK_CHAR_LIMIT = 4000;
 
 export const SAGE_GATE_QUESTION_INSTRUCTIONS =
   "Is this code snippet an obvious benign false positive for the specified vulnerability? Answer yes only when the snippet clearly cannot introduce it. Answer no if the vulnerability is plausible or you are unsure.";
@@ -43,11 +50,15 @@ export function getRuleDescription(slug: string): string {
 
 /**
  * Extract lines surrounding the matched line numbers from file content.
+ * Many matchers report every hit in a file as one candidate, so the span from
+ * the first to the last match can cover the whole file; the window is anchored
+ * on the first match and capped at `maxLines` to keep the gate request small.
  */
 export function extractSurroundingLines(
   content: string,
   lineNumbers: number[],
   contextLines = 10,
+  maxLines = GATE_CONTEXT_LINE_LIMIT,
 ): string {
   const lines = content.split("\n");
   if (lines.length === 0) return "";
@@ -56,8 +67,14 @@ export function extractSurroundingLines(
   const minLine = Math.min(...validLines);
   const maxLine = Math.max(...validLines);
   const start = Math.max(0, minLine - 1 - contextLines);
-  const end = Math.min(lines.length, maxLine + contextLines);
+  const end = Math.min(lines.length, Math.min(maxLine + contextLines, start + maxLines));
   return lines.slice(start, end).join("\n");
+}
+
+function clampBlock(text: string): string {
+  return text.length <= GATE_BLOCK_CHAR_LIMIT
+    ? text
+    : `${text.slice(0, GATE_BLOCK_CHAR_LIMIT)}\n… (truncated)`;
 }
 
 /**
@@ -86,9 +103,10 @@ export function buildCandidateGateContent(params: {
   if (params.ruleDescription) {
     parts.push(`Vulnerability Rule Description: ${params.ruleDescription}`);
   }
-  parts.push(`Candidate Match Snippet:\n\`\`\`\n${params.snippet}\n\`\`\``);
+  const snippet = clampBlock(params.snippet);
+  parts.push(`Candidate Match Snippet:\n\`\`\`\n${snippet}\n\`\`\``);
   if (params.surroundingContext && params.surroundingContext.trim() !== params.snippet.trim()) {
-    parts.push(`Surrounding Context:\n\`\`\`\n${params.surroundingContext}\n\`\`\``);
+    parts.push(`Surrounding Context:\n\`\`\`\n${clampBlock(params.surroundingContext)}\n\`\`\``);
   }
   return parts.join("\n\n");
 }
@@ -336,9 +354,12 @@ export async function filterCandidatesWithSage(
     message: `Evaluating ${items.length} candidate(s) in chunks of ${batchSize}…`,
   });
 
-  // A bad key, an exhausted quota or a rejected request fails the same way on
-  // every remaining chunk. Record the failure once and fail the rest open
-  // without issuing more known-doomed round trips.
+  // A bad key or an exhausted quota fails the same way on every remaining
+  // chunk. Record the failure once and fail the rest open without issuing more
+  // known-doomed round trips. Request-scoped failures (a rejected or oversized
+  // payload) stay chunk-local — the next chunk can still succeed.
+  const isRunWideFailure = (err: unknown): boolean =>
+    err instanceof LevantoSageAuthError || err instanceof LevantoSageQuotaError;
   let permanentError: string | undefined;
 
   // Process items in chunks
@@ -398,7 +419,7 @@ export async function filterCandidatesWithSage(
       } catch (err) {
         // Network or API failure fails open (retains all candidates in chunk)
         const message = err instanceof Error ? err.message : String(err);
-        if (isPermanentSageError(err)) {
+        if (isRunWideFailure(err)) {
           permanentError = message;
         }
         recordUnevaluated(chunk, message);
@@ -423,7 +444,7 @@ export async function filterCandidatesWithSage(
           recordVerdict(item, (res?.result ?? res) as unknown);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          if (isPermanentSageError(err)) {
+          if (isRunWideFailure(err)) {
             permanentError = message;
           }
           recordUnevaluated([item], message);
@@ -474,13 +495,6 @@ export async function filterCandidatesWithSage(
   const retainedCount = decisions.length - filteredCount;
   const retainedCandidates = decisions.filter((d) => !d.filtered).map((d) => d.candidate);
   const filteredCandidates = decisions.filter((d) => d.filtered).map((d) => d.candidate);
-
-  if (params.onProgress) {
-    params.onProgress({
-      type: "sage_gate",
-      message: `Filtered ${filteredCount} candidate(s) (${retainedCount} remaining of ${decisions.length})`,
-    });
-  }
 
   return {
     records: params.records,
