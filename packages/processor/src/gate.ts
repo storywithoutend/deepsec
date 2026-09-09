@@ -492,8 +492,8 @@ export async function filterCandidatesWithSage(
     });
   };
 
-  const recordUnevaluated = (unevaluated: ItemToEvaluate[], error: string) => {
-    for (const item of unevaluated) {
+  const recordFailure = (failed: ItemToEvaluate[], error: string) => {
+    for (const item of failed) {
       decisions.push({
         candidate: item.candidate,
         filePath: item.filePath,
@@ -542,7 +542,7 @@ export async function filterCandidatesWithSage(
     evaluated += chunk.length;
 
     if (permanentError) {
-      recordUnevaluated(chunk, permanentError);
+      recordFailure(chunk, permanentError);
       continue;
     }
 
@@ -570,7 +570,7 @@ export async function filterCandidatesWithSage(
           // a different length means we cannot tell which verdict belongs to
           // which candidate, and mis-binding one would silently drop a real
           // vulnerability — treat the whole chunk as unevaluated.
-          recordUnevaluated(
+          recordFailure(
             chunk,
             `Batch response had ${results?.length ?? 0} result(s) for ${chunk.length} request(s)`,
           );
@@ -584,7 +584,11 @@ export async function filterCandidatesWithSage(
 
             if (!answer || !answer.ok) {
               // Fail open on error in individual batch answer
-              recordUnevaluated([item], !answer ? "Missing answer" : answer.error);
+              const answerError =
+                typeof answer?.error === "string" && answer.error
+                  ? answer.error
+                  : "Sage returned a failed answer with no error message";
+              recordFailure([item], !answer ? "Missing answer" : answerError);
               continue;
             }
 
@@ -597,13 +601,13 @@ export async function filterCandidatesWithSage(
         if (isRunWideSageError(err)) {
           permanentError = message;
         }
-        recordUnevaluated(chunk, message);
+        recordFailure(chunk, message);
       }
     } else if (typeof sageClient.decide === "function") {
       // Fallback for single decide API
       for (const item of chunk) {
         if (permanentError) {
-          recordUnevaluated([item], permanentError);
+          recordFailure([item], permanentError);
           continue;
         }
         try {
@@ -622,12 +626,12 @@ export async function filterCandidatesWithSage(
           if (isRunWideSageError(err)) {
             permanentError = message;
           }
-          recordUnevaluated([item], message);
+          recordFailure([item], message);
         }
       }
     } else {
       // No supported decision method on client — fail open
-      recordUnevaluated(chunk, "Sage client does not implement decideBatch or decide");
+      recordFailure(chunk, "Sage client does not implement decideBatch or decide");
     }
 
     params.onProgress?.({

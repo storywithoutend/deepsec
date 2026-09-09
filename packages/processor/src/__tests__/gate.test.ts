@@ -710,6 +710,33 @@ describe("Sage candidate gate", () => {
       expect(result.errors).toEqual(["model timeout on this question"]);
     });
 
+    it("counts a failed answer with no message as an error", async () => {
+      const candidate: CandidateMatch = {
+        vulnSlug: "sql-injection",
+        lineNumbers: [1],
+        snippet: "db.query()",
+        matchedPattern: "query",
+      };
+
+      const mockSageClient = {
+        // Malformed failure: `ok: false` with no error string.
+        decideBatch: vi.fn(async () => ({ results: [{ answers: [{ ok: false }] }] })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates: [candidate],
+        fileContent: fileWithLines(),
+        sageClient: mockSageClient as any,
+      });
+
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidates).toEqual([candidate]);
+      // Without a message the failure would be invisible in the run summary.
+      expect(result.errorCount).toBe(1);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toBeTruthy();
+    });
+
     it("fails open when answer format is unrecognized or null", async () => {
       const candidate: CandidateMatch = {
         vulnSlug: "sql-injection",
