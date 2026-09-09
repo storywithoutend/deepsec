@@ -407,7 +407,9 @@ export async function filterCandidatesWithSage(
           const fullPath = path.isAbsolute(record.filePath)
             ? record.filePath
             : path.join(params.rootPath, record.filePath);
-          fileContent = fs.readFileSync(fullPath, "utf-8");
+          // Normalized the same way the scanner normalizes before hashing, so
+          // a CRLF checkout is not mistaken for a file edited since the scan.
+          fileContent = fs.readFileSync(fullPath, "utf-8").replaceAll("\r\n", "\n");
         } catch {
           // Without the file there is no way to show Sage the candidate's hits
           // or to attest which lines the snippet covers.
@@ -433,7 +435,7 @@ export async function filterCandidatesWithSage(
         const fullPath = path.isAbsolute(params.filePath)
           ? params.filePath
           : path.join(params.rootPath, params.filePath);
-        fileContent = fs.readFileSync(fullPath, "utf-8");
+        fileContent = fs.readFileSync(fullPath, "utf-8").replaceAll("\r\n", "\n");
       } catch {
         // Ignored — the snippet-only path keeps the candidate.
       }

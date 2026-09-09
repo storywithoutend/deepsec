@@ -1366,6 +1366,58 @@ describe("Sage candidate gate", () => {
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
     });
 
+    it("gates a CRLF file whose normalized content still matches the scan", async () => {
+      const filePath = "src/windows.ts";
+      const lines = ["const a = 1;", "const q = 'SELECT 1';", "const b = 2;"];
+      // Written with CRLF; the scanner hashes the LF-normalized form.
+      fs.mkdirSync(path.dirname(path.join(tmpDir, filePath)), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, filePath), `${lines.join("\r\n")}\r\n`);
+      const fileHash = hashOf(`${lines.join("\n")}\n`);
+
+      const candidate: CandidateMatch = {
+        vulnSlug: "sql-injection",
+        lineNumbers: [2],
+        snippet: "const q = 'SELECT 1';",
+        matchedPattern: "SELECT",
+      };
+      const record = createTestRecord(filePath, [candidate], fileHash);
+
+      let capturedContent = "";
+      const mockSageClient = {
+        decideBatch: vi.fn(async (req: any) => {
+          capturedContent = req.requests[0].content;
+          return {
+            results: [
+              {
+                answers: [
+                  {
+                    ok: true,
+                    result: {
+                      id: "benign_false_positive",
+                      kind: "yesno",
+                      result: { answer: "yes", confidence: 0.99 },
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }),
+      };
+
+      const result = await filterCandidatesWithSage({
+        records: [record],
+        rootPath: tmpDir,
+        sageClient: mockSageClient as any,
+      });
+
+      // A Windows checkout is not a stale scan: the candidate is still gated.
+      expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(1);
+      expect(capturedContent).not.toContain("\r");
+      expect(result.unevaluatedCount).toBe(0);
+      expect(result.filteredCount).toBe(1);
+    });
+
     it("retains a candidate whose file changed since it was scanned", async () => {
       const filePath = "src/shifted.ts";
       writeFile(tmpDir, filePath, "// inserted header\n// inserted header\nconst safe = 1;\n");
