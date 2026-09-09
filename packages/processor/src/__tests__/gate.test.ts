@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildCandidateGateContent,
   DEFAULT_SAGE_GATE_CONFIDENCE,
+  extractCandidateContext,
   extractSurroundingLines,
   filterCandidatesWithSage,
   GATE_BLOCK_CHAR_LIMIT,
@@ -55,16 +56,38 @@ describe("Sage candidate gate", () => {
       expect(context).toBe(content);
     });
 
-    it("extractSurroundingLines caps the window when matches span the whole file", () => {
+    it("windows every match and caps the total when hits span the whole file", () => {
       const content = Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join("\n");
       // One candidate carrying every hit in the file — matchers commonly do this.
-      const extracted = extractSurroundingLines(content, [12, 45, 300, 1180]);
+      const { text, coveredLines } = extractCandidateContext(content, [12, 45, 300, 1180]);
 
-      const extractedLines = extracted.split("\n");
-      expect(extractedLines.length).toBeLessThanOrEqual(GATE_CONTEXT_LINE_LIMIT);
-      // Anchored on the first match, not stretched to the last one.
-      expect(extracted).toContain("line 12");
-      expect(extracted).not.toContain("line 1180");
+      const codeLines = text.split("\n").filter((l: string) => l !== "…");
+      expect(codeLines.length).toBeLessThanOrEqual(GATE_CONTEXT_LINE_LIMIT);
+      // Every hit is visible, not just the first — filtering the candidate on
+      // one benign hit while three others were never sent would be unsafe.
+      for (const hit of [12, 45, 300, 1180]) {
+        expect(codeLines).toContain(`line ${hit}`);
+      }
+      expect(coveredLines).toEqual([12, 45, 300, 1180]);
+      // Non-contiguous windows are marked as elided rather than run together.
+      expect(text).toContain("\n…\n");
+      expect(text).not.toContain("line 200");
+    });
+
+    it("reports only the hits it actually sent when the cap truncates windows", () => {
+      const content = Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n");
+      const hits = Array.from({ length: 40 }, (_, i) => 20 + i * 40);
+      const { text, coveredLines } = extractCandidateContext(content, hits);
+
+      const codeLines = text.split("\n").filter((l: string) => l !== "…");
+      expect(codeLines.length).toBeLessThanOrEqual(GATE_CONTEXT_LINE_LIMIT);
+      expect(coveredLines.length).toBeLessThan(hits.length);
+      for (const covered of coveredLines) {
+        expect(codeLines).toContain(`line ${covered}`);
+      }
+      for (const hit of hits.filter((h) => !coveredLines.includes(h))) {
+        expect(codeLines).not.toContain(`line ${hit}`);
+      }
     });
 
     it("buildCandidateGateContent truncates oversized code blocks", () => {
@@ -876,6 +899,65 @@ describe("Sage candidate gate", () => {
       expect(capturedContent).toContain("File: src/example.ts (lines 3)");
       expect(capturedContent).toContain("Header comment");
       expect(capturedContent).toContain("Vulnerability Rule Description:");
+    });
+
+    it("advertises only the hit lines the sent context actually covers", async () => {
+      const filePath = "src/many-hits.ts";
+      const fullPath = path.join(tmpDir, filePath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(
+        fullPath,
+        `${Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
+      );
+
+      const hits = Array.from({ length: 40 }, (_, i) => 20 + i * 40);
+      const candidate: CandidateMatch = {
+        vulnSlug: "crypto-usage",
+        lineNumbers: hits,
+        snippet: "line 20",
+        matchedPattern: "crypto",
+      };
+      const record = createTestRecord(filePath, [candidate]);
+
+      let capturedContent = "";
+      const mockSageClient = {
+        decideBatch: vi.fn(async (req: any) => {
+          capturedContent = req.requests[0].content;
+          return {
+            results: [
+              {
+                answers: [
+                  {
+                    ok: true,
+                    result: {
+                      id: "benign_false_positive",
+                      kind: "yesno",
+                      result: { answer: "no", confidence: 0.9 },
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }),
+      };
+
+      await filterCandidatesWithSage({
+        records: [record],
+        rootPath: tmpDir,
+        sageClient: mockSageClient as any,
+      });
+
+      const header = capturedContent.split("\n")[0];
+      const advertised = (header.match(/lines ([\d, ]+)\)/)?.[1] ?? "")
+        .split(", ")
+        .map((n) => Number(n));
+      expect(advertised.length).toBeGreaterThan(0);
+      expect(advertised.length).toBeLessThan(hits.length);
+      // Every advertised hit is present in the content Sage was actually sent.
+      for (const line of advertised) {
+        expect(capturedContent).toContain(`line ${line}\n`);
+      }
     });
 
     it("falls back to candidate snippet when file does not exist on disk", async () => {

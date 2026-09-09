@@ -119,9 +119,10 @@ finding (see [data-layout](data-layout.md)). Sage triage needs
 [configuration](configuration.md)), and that check is not skipped by the
 local-subscription route. If the Claude fallback is enabled but no Claude
 credential is available, deepsec warns and disables the fallback instead
-of failing. A non-retryable Sage error — bad key, exhausted quota, a
-rejected request — aborts the run rather than silently redirecting the
-whole corpus to Claude.
+of failing. An account-scoped Sage error — bad key or
+exhausted quota — aborts the run rather than silently redirecting the
+whole corpus to Claude; a rejected request is scoped to its own batch and
+falls back like any other batch failure.
 
 ## Sage candidate gate
 
@@ -146,8 +147,9 @@ record on disk. Candidates the gate could not evaluate are reported as
 `Sage gate errors` in the run summary so a gate that silently never ran
 doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`
 or `LEVANTO_API_KEY`, same as Sage triage, and runs orchestrator-side only:
-`deepsec sandbox process` rejects the flag rather than forwarding it into
-microVMs that have neither the credential nor egress to Sage.
+`deepsec sandbox` rejects the Sage flags — for the gate and for `--sage`
+triage alike — rather than forwarding them into microVMs that have
+neither the credential nor egress to Sage.
 
 What that means across runs depends on whether the gate cleared the whole
 file:

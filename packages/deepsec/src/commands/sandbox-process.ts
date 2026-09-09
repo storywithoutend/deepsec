@@ -41,20 +41,33 @@ function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
 
+const SAGE_ONLY_FLAGS = [
+  "--sage-gate",
+  "--sage-gate-confidence",
+  "--sage",
+  "--latency-mode",
+  "--min-confidence",
+  "--claude-fallback",
+  "--no-claude-fallback",
+];
+
 /**
- * The Sage candidate gate runs orchestrator-side only: sandboxes get neither
- * a Sage credential nor egress to the Sage host, so forwarding the flag would
- * fail every worker at preflight after provisioning.
+ * Everything Levanto Sage-backed runs orchestrator-side only: sandboxes get
+ * neither a Sage credential nor egress to the Sage host, so forwarding these
+ * flags would fail every worker at preflight after provisioning.
  */
-export function assertNoSageGateFlag(args: string[]): void {
-  const flag = args.find((a) => a === "--sage-gate" || a.startsWith("--sage-gate-confidence"));
+export function assertNoSageFlags(args: string[]): void {
+  const flag = args.find((a) => {
+    const name = a.split("=", 1)[0];
+    if (SAGE_ONLY_FLAGS.includes(name)) return true;
+    return name === "--provider" && args[args.indexOf(a) + 1] === "sage";
+  });
   if (!flag) return;
+  const subject = flag.startsWith("--sage-gate") ? "Sage candidate gate" : "Sage triage";
   console.error(
-    `${flag} is not supported in sandbox mode — the Sage candidate gate runs orchestrator-side only.`,
+    `${flag} is not supported in sandbox mode — the ${subject} runs orchestrator-side only.`,
   );
-  console.error(
-    "Run `deepsec process --sage-gate` locally, or drop the flag to sandbox the agent runs.",
-  );
+  console.error("Run the Sage-backed command locally, or drop the flag to sandbox the agent runs.");
   process.exit(1);
 }
 
@@ -162,7 +175,7 @@ export async function sandboxCommand(subcommand: string, opts: SandboxOpts) {
     process.exit(1);
   }
 
-  assertNoSageGateFlag(opts.args ?? []);
+  assertNoSageFlags(opts.args ?? []);
 
   const projectId = resolveProjectId(opts.projectId);
   const config = buildConfig(subcommand as SandboxSubcommand, projectId, opts);

@@ -240,12 +240,15 @@ export function isRetryableSageError(
 }
 
 /**
- * A Sage failure that will repeat identically on every subsequent request in
- * this run — bad key, exhausted quota, rejected request. Callers use it to
- * stop issuing known-doomed calls.
+ * A Sage failure that is scoped to the credential or account, so it repeats
+ * identically on every subsequent request in this run. Callers use it to stop
+ * issuing known-doomed calls. Request-scoped rejections (a malformed or
+ * oversized payload) are deliberately excluded: the next request can succeed.
  */
-export function isPermanentSageError(err: unknown): err is LevantoSageError {
-  return err instanceof LevantoSageError && !isRetryableSageError(err);
+export function isRunWideSageError(
+  err: unknown,
+): err is LevantoSageAuthError | LevantoSageQuotaError {
+  return err instanceof LevantoSageAuthError || err instanceof LevantoSageQuotaError;
 }
 
 export interface LevantoSageClientOptions {

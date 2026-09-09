@@ -13,7 +13,7 @@ import {
   writeRunMeta,
 } from "@deepsec/core";
 import {
-  isPermanentSageError,
+  isRunWideSageError,
   LevantoSageClient,
   type SageChoiceResult,
   type SageOption,
@@ -22,6 +22,7 @@ import {
 
 const TRIAGE_BATCH_SIZE = 30;
 const PROJECT_INFO_CHAR_LIMIT = 2000;
+const FINDING_TEXT_CHAR_LIMIT = 4000;
 
 export const SAGE_MODEL_NAME = "levanto-sage-v0.8";
 export const CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6";
@@ -120,8 +121,16 @@ export interface TriageResult {
   skip: number;
 }
 
+function clampFindingText(text: string): string {
+  return text.length <= FINDING_TEXT_CHAR_LIMIT
+    ? text
+    : `${text.slice(0, FINDING_TEXT_CHAR_LIMIT)}… (truncated)`;
+}
+
 /**
  * Format a finding into structured text content for evaluation by Sage.
+ * Agent-written prose is clamped so one oversized finding cannot get the whole
+ * batch rejected for payload size.
  */
 export function formatFindingForSage(
   finding: Finding,
@@ -136,8 +145,8 @@ export function formatFindingForSage(
     `Vulnerability Slug: ${finding.vulnSlug}`,
     finding.lineNumbers?.length ? `Lines: ${finding.lineNumbers.join(", ")}` : null,
     finding.confidence ? `Scanner Confidence: ${finding.confidence}` : null,
-    `Description: ${finding.description}`,
-    finding.recommendation ? `Recommendation: ${finding.recommendation}` : null,
+    `Description: ${clampFindingText(finding.description)}`,
+    finding.recommendation ? `Recommendation: ${clampFindingText(finding.recommendation)}` : null,
   ].filter((p): p is string => Boolean(p));
 
   return parts.join("\n");
@@ -592,10 +601,11 @@ export async function triage(params: TriageParams): Promise<TriageResult> {
       // Sage failed before any verdict was committed — the whole batch is still
       // untriaged, so it can be retried in full without double counting.
 
-      // Auth, quota and request-shape errors are permanent for the whole run:
-      // retrying them per batch would silently redirect the entire corpus to
-      // Claude while every batch reports the same failure.
-      if (isPermanentSageError(err)) {
+      // Auth and quota errors are permanent for the whole run: retrying them
+      // per batch would silently redirect the entire corpus to Claude while
+      // every batch reports the same failure. A rejected request is scoped to
+      // its own batch and falls through to the per-batch handling below.
+      if (isRunWideSageError(err)) {
         fatalSageError ??= err;
         batchesInFlight--;
         batchesCompleted++;

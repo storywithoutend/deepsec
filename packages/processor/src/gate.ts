@@ -4,9 +4,8 @@ import type { CandidateMatch, FileRecord } from "@deepsec/core";
 import { getRegistry } from "@deepsec/core";
 import { createDefaultRegistry } from "@deepsec/scanner";
 import {
-  LevantoSageAuthError,
+  isRunWideSageError,
   LevantoSageClient,
-  LevantoSageQuotaError,
   type SageBatchRequestGroup,
   type SageYesNoQuestion,
 } from "./sage/index.js";
@@ -49,10 +48,69 @@ export function getRuleDescription(slug: string): string {
 }
 
 /**
- * Extract lines surrounding the matched line numbers from file content.
- * Many matchers report every hit in a file as one candidate, so the span from
- * the first to the last match can cover the whole file; the window is anchored
- * on the first match and capped at `maxLines` to keep the gate request small.
+ * Extract the code around a candidate's matched lines, together with the lines
+ * the extract actually covers.
+ *
+ * Many matchers report every hit in a file as one candidate, so a single span
+ * from the first to the last match can cover the whole file. Instead each hit
+ * gets its own bounded window; overlapping windows are merged, non-contiguous
+ * ones are separated by an elision marker, and the total number of code lines
+ * is capped at `maxLines`. Hits that do not fit are reported back through
+ * `coveredLines` so the caller never advertises context it did not send.
+ */
+export function extractCandidateContext(
+  content: string,
+  lineNumbers: number[],
+  contextLines = 10,
+  maxLines = GATE_CONTEXT_LINE_LIMIT,
+): { text: string; coveredLines: number[] } {
+  const lines = content.split("\n");
+  if (lines.length === 0) return { text: "", coveredLines: [] };
+  const validLines = Array.from(
+    new Set(lineNumbers.filter((n) => typeof n === "number" && !Number.isNaN(n) && n > 0)),
+  ).sort((a, b) => a - b);
+  if (validLines.length === 0) return { text: content.slice(0, 1000), coveredLines: [] };
+
+  const perHit = Math.max(1, Math.floor(maxLines / validLines.length));
+  const half = Math.max(1, Math.min(contextLines, Math.floor((perHit - 1) / 2)));
+
+  const spans: { start: number; end: number }[] = [];
+  for (const line of validLines) {
+    const start = Math.max(0, line - 1 - half);
+    const end = Math.min(lines.length, line + half);
+    const last = spans[spans.length - 1];
+    if (last && start <= last.end) {
+      last.end = Math.max(last.end, end);
+    } else {
+      spans.push({ start, end });
+    }
+  }
+
+  const emitted: { start: number; end: number }[] = [];
+  let budget = maxLines;
+  for (const span of spans) {
+    if (budget <= 0) break;
+    const end = Math.min(span.end, span.start + budget);
+    emitted.push({ start: span.start, end });
+    budget -= end - span.start;
+  }
+
+  const blocks = emitted.map((span) => lines.slice(span.start, span.end).join("\n"));
+  const text = blocks.reduce((acc, block, i) => {
+    if (i === 0) return block;
+    const contiguous = emitted[i].start === emitted[i - 1].end;
+    return `${acc}\n${contiguous ? "" : "…\n"}${block}`;
+  }, "");
+
+  const coveredLines = validLines.filter((line) =>
+    emitted.some((span) => line - 1 >= span.start && line - 1 < span.end),
+  );
+
+  return { text, coveredLines };
+}
+
+/**
+ * Text-only view of {@link extractCandidateContext}.
  */
 export function extractSurroundingLines(
   content: string,
@@ -60,15 +118,7 @@ export function extractSurroundingLines(
   contextLines = 10,
   maxLines = GATE_CONTEXT_LINE_LIMIT,
 ): string {
-  const lines = content.split("\n");
-  if (lines.length === 0) return "";
-  const validLines = lineNumbers.filter((n) => typeof n === "number" && !Number.isNaN(n) && n > 0);
-  if (validLines.length === 0) return content.slice(0, 1000);
-  const minLine = Math.min(...validLines);
-  const maxLine = Math.max(...validLines);
-  const start = Math.max(0, minLine - 1 - contextLines);
-  const end = Math.min(lines.length, Math.min(maxLine + contextLines, start + maxLines));
-  return lines.slice(start, end).join("\n");
+  return extractCandidateContext(content, lineNumbers, contextLines, maxLines).text;
 }
 
 function clampBlock(text: string): string {
@@ -246,8 +296,11 @@ export async function filterCandidatesWithSage(
 
       for (const candidate of record.candidates) {
         let surroundingContext: string | undefined;
+        let contextLineNumbers = candidate.lineNumbers;
         if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
-          surroundingContext = extractSurroundingLines(fileContent, candidate.lineNumbers);
+          const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
+          surroundingContext = extracted.text;
+          contextLineNumbers = extracted.coveredLines;
         }
 
         const ruleDesc = resolveDescription(candidate.vulnSlug);
@@ -257,7 +310,7 @@ export async function filterCandidatesWithSage(
           ruleDescription: ruleDesc,
           vulnSlug: candidate.vulnSlug,
           filePath: record.filePath,
-          lineNumbers: candidate.lineNumbers,
+          lineNumbers: contextLineNumbers,
         });
 
         items.push({
@@ -282,8 +335,11 @@ export async function filterCandidatesWithSage(
 
     for (const candidate of params.candidates) {
       let surroundingContext: string | undefined;
+      let contextLineNumbers = candidate.lineNumbers;
       if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
-        surroundingContext = extractSurroundingLines(fileContent, candidate.lineNumbers);
+        const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
+        surroundingContext = extracted.text;
+        contextLineNumbers = extracted.coveredLines;
       }
 
       const ruleDesc = resolveDescription(candidate.vulnSlug);
@@ -293,7 +349,7 @@ export async function filterCandidatesWithSage(
         ruleDescription: ruleDesc,
         vulnSlug: candidate.vulnSlug,
         filePath: params.filePath,
-        lineNumbers: candidate.lineNumbers,
+        lineNumbers: contextLineNumbers,
       });
 
       items.push({
@@ -358,8 +414,6 @@ export async function filterCandidatesWithSage(
   // chunk. Record the failure once and fail the rest open without issuing more
   // known-doomed round trips. Request-scoped failures (a rejected or oversized
   // payload) stay chunk-local — the next chunk can still succeed.
-  const isRunWideFailure = (err: unknown): boolean =>
-    err instanceof LevantoSageAuthError || err instanceof LevantoSageQuotaError;
   let permanentError: string | undefined;
 
   // Process items in chunks
@@ -419,7 +473,7 @@ export async function filterCandidatesWithSage(
       } catch (err) {
         // Network or API failure fails open (retains all candidates in chunk)
         const message = err instanceof Error ? err.message : String(err);
-        if (isRunWideFailure(err)) {
+        if (isRunWideSageError(err)) {
           permanentError = message;
         }
         recordUnevaluated(chunk, message);
@@ -444,7 +498,7 @@ export async function filterCandidatesWithSage(
           recordVerdict(item, (res?.result ?? res) as unknown);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          if (isRunWideFailure(err)) {
+          if (isRunWideSageError(err)) {
             permanentError = message;
           }
           recordUnevaluated([item], message);

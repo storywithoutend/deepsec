@@ -1,6 +1,6 @@
 export {
-  isPermanentSageError,
   isRetryableSageError,
+  isRunWideSageError,
   LevantoSageAuthError,
   LevantoSageClient,
   type LevantoSageClientOptions,

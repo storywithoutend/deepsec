@@ -1062,12 +1062,6 @@ describe("Sage Triage", () => {
     for (const [label, makeError] of [
       ["auth", () => new LevantoSageAuthError("revoked key", { status: 401 })],
       ["quota", () => new LevantoSageQuotaError("out of credits", { status: 402 })],
-      ["validation", () => new LevantoSageValidationError("bad request", { status: 400 })],
-      // Any other non-2xx status arrives as a plain LevantoSageError and is just
-      // as permanent — 422 is what a detail-shaped API returns for a bad shape.
-      ["unprocessable", () => new LevantoSageError("unprocessable entity", { status: 422 })],
-      ["payload-too-large", () => new LevantoSageError("payload too large", { status: 413 })],
-      ["not-found", () => new LevantoSageError("no such endpoint", { status: 404 })],
     ] as const) {
       it(`aborts the run on a ${label} error instead of re-triaging with Claude`, async () => {
         writeOneFinding("src/one.ts", "First finding");
@@ -1096,6 +1090,51 @@ describe("Sage Triage", () => {
         for (const record of loadAllFileRecords(projectId)) {
           expect(record.findings[0].triage).toBeUndefined();
         }
+      });
+    }
+
+    // A rejected request is scoped to the payload that caused it — one
+    // oversized finding must not strand the rest of the corpus untriaged.
+    for (const [label, makeError] of [
+      ["validation", () => new LevantoSageValidationError("bad request", { status: 400 })],
+      ["unprocessable", () => new LevantoSageError("unprocessable entity", { status: 422 })],
+      ["payload-too-large", () => new LevantoSageError("payload too large", { status: 413 })],
+    ] as const) {
+      it(`falls back to Claude on a ${label} error instead of aborting the run`, async () => {
+        writeOneFinding("src/rejected.ts", "Rejected finding");
+
+        vi.mocked(query).mockImplementation(async function* () {
+          yield {
+            type: "result",
+            subtype: "success",
+            result: JSON.stringify([
+              {
+                title: "Rejected finding",
+                priority: "P1",
+                exploitability: "moderate",
+                impact: "medium",
+                reasoning: "Claude fallback verdict",
+              },
+            ]),
+          } as any;
+        } as any);
+
+        const mockSageClient = {
+          decideBatch: vi.fn(async () => {
+            throw makeError();
+          }),
+        } as unknown as LevantoSageClient;
+
+        const result = await triage({
+          projectId,
+          severity: "MEDIUM",
+          provider: "sage",
+          fallbackToClaude: true,
+          sageClient: mockSageClient,
+        });
+
+        expect(result).toEqual({ triaged: 1, p0: 0, p1: 1, p2: 0, skip: 0 });
+        expect(listRuns(projectId).map((r) => r.phase)).toContain("done");
       });
     }
 
