@@ -1197,6 +1197,55 @@ describe("Sage candidate gate", () => {
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
     });
 
+    it("retains a candidate whose file could not be read", async () => {
+      const candidate: CandidateMatch = {
+        vulnSlug: "crypto-usage",
+        // The snippet only covers the first hit; the rest can only come from
+        // the file, which is gone.
+        lineNumbers: [12, 40, 88, 140],
+        snippet: "hash := md5.New()",
+        matchedPattern: "md5",
+      };
+      const record = createTestRecord("gone.go", [candidate]);
+
+      let capturedContent = "";
+      const mockSageClient = {
+        decideBatch: vi.fn(async (req: any) => {
+          capturedContent = req.requests[0].content;
+          return {
+            results: [
+              {
+                answers: [
+                  {
+                    ok: true,
+                    result: {
+                      id: "benign_false_positive",
+                      kind: "yesno",
+                      result: { answer: "yes", confidence: 0.99 },
+                    },
+                  },
+                ],
+              },
+            ],
+          };
+        }),
+      };
+
+      const result = await filterCandidatesWithSage({
+        records: [record],
+        rootPath: tmpDir,
+        sageClient: mockSageClient as any,
+      });
+
+      // The header must not claim coverage of lines that were never sent…
+      expect(capturedContent).toContain("File: gone.go");
+      expect(capturedContent).not.toContain("lines 12, 40, 88, 140");
+      // …and a confident benign verdict on that partial view cannot drop it.
+      expect(result.decisions[0].answer).toBe("yes");
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidatesByFile.get("gone.go")).toEqual([candidate]);
+    });
+
     it("falls back to candidate snippet when file does not exist on disk", async () => {
       const candidate: CandidateMatch = {
         vulnSlug: "xss",
