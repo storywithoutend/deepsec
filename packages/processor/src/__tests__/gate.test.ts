@@ -710,6 +710,54 @@ describe("Sage candidate gate", () => {
       expect(result.errors).toEqual(["model timeout on this question"]);
     });
 
+    it("fails only the malformed answer, not the candidates already decided", async () => {
+      const benign: CandidateMatch = {
+        vulnSlug: "sql-injection",
+        lineNumbers: [1],
+        snippet: "const q = 'SELECT 1';",
+        matchedPattern: "SELECT",
+      };
+      const other: CandidateMatch = {
+        vulnSlug: "xss",
+        lineNumbers: [2],
+        snippet: "el.innerHTML = 'constant'",
+        matchedPattern: "innerHTML",
+      };
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "benign_false_positive",
+                    kind: "yesno",
+                    result: { answer: "yes", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+            // Malformed group: decoding it throws.
+            { answers: [null] },
+          ],
+        })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        candidates: [benign, other],
+        fileContent: fileWithLines(),
+        sageClient: mockSageClient as any,
+      });
+
+      // One decision per candidate — no candidate is both filtered and retained.
+      expect(result.totalCandidates).toBe(2);
+      expect(result.filteredCandidates).toEqual([benign]);
+      expect(result.retainedCandidates).toEqual([other]);
+      expect(result.errorCount).toBe(1);
+    });
+
     it("counts a failed answer with no message as an error", async () => {
       const candidate: CandidateMatch = {
         vulnSlug: "sql-injection",

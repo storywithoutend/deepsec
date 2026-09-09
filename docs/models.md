@@ -127,9 +127,9 @@ falls back like any other batch failure.
 ## Sage candidate gate
 
 `process --sage-gate` puts the same Levanto Sage decision model in front
-of the coding agent: every scanner candidate is sent to Sage in `fast`
-latency mode with its snippet, surrounding context, and the matcher's
-rule description, and Sage answers one question — is this an obvious
+of the coding agent: every scanner candidate the gate can show in full is
+sent to Sage in `fast` latency mode with its snippet, surrounding
+context, and the matcher's rule description, and Sage answers one question — is this an obvious
 benign false positive? Candidates it calls benign are hidden from the
 agent's prompt, and a file left with no candidates is skipped entirely
 instead of being handed to the agent for an open-ended review.

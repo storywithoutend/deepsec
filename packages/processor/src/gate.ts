@@ -577,22 +577,28 @@ export async function filterCandidatesWithSage(
         } else {
           for (let j = 0; j < chunk.length; j++) {
             const item = chunk[j];
-            const groupResult = results[j];
-            const answer =
-              groupResult?.answers?.find((a) => a.ok && a.result?.id === GATE_QUESTION_ID) ??
-              groupResult?.answers?.[0];
+            // Each answer is decoded on its own: a malformed group must fail
+            // only its own candidate, never re-record ones already decided.
+            try {
+              const groupResult = results[j];
+              const answer =
+                groupResult?.answers?.find((a) => a.ok && a.result?.id === GATE_QUESTION_ID) ??
+                groupResult?.answers?.[0];
 
-            if (!answer || !answer.ok) {
-              // Fail open on error in individual batch answer
-              const answerError =
-                typeof answer?.error === "string" && answer.error
-                  ? answer.error
-                  : "Sage returned a failed answer with no error message";
-              recordFailure([item], !answer ? "Missing answer" : answerError);
-              continue;
+              if (!answer || !answer.ok) {
+                // Fail open on error in individual batch answer
+                const answerError =
+                  typeof answer?.error === "string" && answer.error
+                    ? answer.error
+                    : "Sage returned a failed answer with no error message";
+                recordFailure([item], !answer ? "Missing answer" : answerError);
+                continue;
+              }
+
+              recordVerdict(item, (answer.result?.result ?? answer.result) as unknown);
+            } catch (err) {
+              recordFailure([item], err instanceof Error ? err.message : String(err));
             }
-
-            recordVerdict(item, (answer.result?.result ?? answer.result) as unknown);
           }
         }
       } catch (err) {
