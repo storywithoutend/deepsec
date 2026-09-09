@@ -576,7 +576,7 @@ export async function filterCandidatesWithSage(
                 groupResult?.answers?.find((a) => a.ok && a.result?.id === GATE_QUESTION_ID) ??
                 groupResult?.answers?.[0];
 
-              if (!answer || !answer.ok) {
+              if (!answer?.ok) {
                 // Fail open on error in individual batch answer
                 const answerError =
                   typeof answer?.error === "string" && answer.error
@@ -648,7 +648,7 @@ export async function filterCandidatesWithSage(
   const collectRetained = (filePath: string, candidates: CandidateMatch[]) => {
     const retained = candidates.filter((c) => {
       const d = decisionMap.get(c);
-      return !d || !d.filtered;
+      return !d?.filtered;
     });
     retainedCandidatesByFile.set(filePath, retained);
   };

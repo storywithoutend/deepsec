@@ -135,8 +135,9 @@ clear error on first use.
 
 Three caveats: the login must exist for the harness you actually run
 (`claude` for `--agent claude`, a logged-in `codex` for `--agent codex`),
-`triage --sage` still needs a `SAGE_API_KEY` because a Levanto key has no
-local-login equivalent, and `sandbox` commands still need a real API token
+the Sage-backed paths (`triage --sage`, `process --sage-gate`) still need
+a `SAGE_API_KEY` because a Levanto key has no local-login equivalent, and
+`sandbox` commands still need a real API token
 (`AI_GATEWAY_API_KEY`), because a machine-local login can't be brokered
 into an isolated sandbox.
 
