@@ -144,9 +144,11 @@ confident benign verdict — a plausible-vulnerability answer, a missing or
 below-threshold confidence, an unparseable answer, or an API error —
 keeps the candidate, as does a verdict formed from a context window that
 could not fit every one of the candidate's matched lines, and the gate never deletes candidates from the file
-record on disk. Candidates the gate could not evaluate are reported as
-`Sage gate errors` in the run summary so a gate that silently never ran
-doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`
+record on disk. A candidate the gate cannot show Sage in full is not sent
+at all — the verdict would have to be ignored — and the run summary
+reports those separately as `Candidates never sent to Sage`, alongside
+`Sage gate errors` for candidates whose request failed. Both lines exist
+so a gate that never really asked doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`
 or `LEVANTO_API_KEY`, same as Sage triage, and runs orchestrator-side only:
 `deepsec sandbox` rejects the Sage flags — for the gate and for `--sage`
 triage alike — rather than forwarding them into microVMs that have
@@ -165,6 +167,14 @@ file:
   `--reinvestigate` or `process --files` — stays `analyzed`, so it keeps
   counting in `report` and `metrics` and needs `--reinvestigate` to be
   looked at again.
+
+  Because file selection is deterministic, this interacts with `--limit`:
+  fully gated files stay at the front of the work set and are re-picked by
+  every subsequent `--sage-gate --limit N` run, so those slots are spent
+  re-gating them instead of reaching later pending files. If a run reports
+  many skipped files and few analyses, raise `--limit`, narrow the run with
+  `--filter`, or drop `--sage-gate` for a pass so those files reach a
+  terminal status.
 - **Some candidates filtered** — the agent investigates the rest and the
   file ends the run `analyzed`, which takes it out of the default work
   set. The filtered candidates are still on the record, but no later run

@@ -132,11 +132,17 @@ export async function processCommand(opts: {
 
 function printSageGateSummary(result: {
   candidatesFilteredBySage?: number;
+  sageGateUnevaluated?: number;
   sageGateSkippedFiles?: number;
   sageGateErrors?: { count: number; messages: string[] };
 }): void {
   if (result.candidatesFilteredBySage !== undefined) {
     console.log(`  Candidates filtered by Sage: ${result.candidatesFilteredBySage}`);
+  }
+  if (result.sageGateUnevaluated) {
+    console.log(
+      `  ${YELLOW}Candidates never sent to Sage: ${result.sageGateUnevaluated} (kept — no context covering every match)${RESET}`,
+    );
   }
   if (result.sageGateSkippedFiles) {
     console.log(`  Files skipped by Sage gate: ${result.sageGateSkippedFiles}`);

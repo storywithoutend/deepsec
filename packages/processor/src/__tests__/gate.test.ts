@@ -1077,10 +1077,13 @@ describe("Sage candidate gate", () => {
       });
 
       // The cap left hits unsent, so no verdict could be acted on: the gate
-      // must not spend a request to buy one.
+      // must not spend a request to buy one, and must not report the retain as
+      // "Sage found nothing benign".
       expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
       expect(capturedContent).toBe("");
       expect(result.totalCandidates).toBe(1);
+      expect(result.unevaluatedCount).toBe(1);
+      expect(result.errorCount).toBe(0);
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
     });
@@ -1130,6 +1133,7 @@ describe("Sage candidate gate", () => {
       // Sage saw all 40 hits, so its benign verdict applies to the whole
       // candidate — the gate must actually save the agent run here.
       expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(1);
+      expect(result.unevaluatedCount).toBe(0);
       expect(result.filteredCount).toBe(1);
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([]);
     });
@@ -1319,6 +1323,7 @@ describe("Sage candidate gate", () => {
       // Nothing to ask about: without the file the verdict could not be used.
       expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
       expect(capturedContent).toBe("");
+      expect(result.unevaluatedCount).toBe(1);
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidatesByFile.get("gone.go")).toEqual([candidate]);
     });

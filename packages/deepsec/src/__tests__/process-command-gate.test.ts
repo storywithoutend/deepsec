@@ -160,6 +160,7 @@ describe("processCommand --sage-gate flags and validation", () => {
       errorBatchCount: 0,
       candidatesFilteredBySage: 0,
       sageGateSkippedFiles: 2,
+      sageGateUnevaluated: 7,
       sageGateErrors: { count: 4, messages: ["HTTP 401 invalid api key"] },
     } as never);
     const logSpy = vi.spyOn(console, "log");
@@ -168,6 +169,7 @@ describe("processCommand --sage-gate flags and validation", () => {
 
     const printed = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(printed).toContain("Files skipped by Sage gate: 2");
+    expect(printed).toContain("Candidates never sent to Sage: 7");
     expect(printed).toContain("Sage gate errors: 4");
     expect(printed).toContain("HTTP 401 invalid api key");
   });

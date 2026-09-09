@@ -277,6 +277,11 @@ export interface CandidateGateDecision {
   answer?: "yes" | "no" | string;
   confidence?: number;
   error?: string;
+  /**
+   * Sage was never asked: the payload could not be shown to cover the
+   * candidate, so any verdict would have had to be ignored anyway.
+   */
+  unevaluated?: boolean;
 }
 
 export interface FilterCandidatesParams {
@@ -309,6 +314,13 @@ export interface FilterCandidatesResult {
   totalCandidates: number;
   /** Candidates whose evaluation failed and were retained fail-open. */
   errorCount: number;
+  /**
+   * Candidates never sent to Sage because the gate could not build a payload
+   * covering them (unreadable file, or hits the context budget could not fit).
+   * They are retained, and they are not failures — but they are also not
+   * evidence that Sage found nothing benign.
+   */
+  unevaluatedCount: number;
   /** Distinct failure messages behind `errorCount`, in first-seen order. */
   errors: string[];
   decisions: CandidateGateDecision[];
@@ -456,6 +468,7 @@ export async function filterCandidatesWithSage(
       totalCandidates: 0,
       errorCount: 0,
       errors: [],
+      unevaluatedCount: 0,
       decisions: [],
     };
   }
@@ -500,15 +513,19 @@ export async function filterCandidatesWithSage(
         candidate: item.candidate,
         filePath: item.filePath,
         filtered: false,
+        unevaluated: true,
       });
     } else {
       evaluable.push(item);
     }
   }
 
+  const unsent = items.length - evaluable.length;
   params.onProgress?.({
     type: "sage_gate",
-    message: `Evaluating ${evaluable.length} candidate(s) in chunks of ${batchSize}…`,
+    message: `Evaluating ${evaluable.length} candidate(s) in chunks of ${batchSize}…${
+      unsent > 0 ? ` (${unsent} kept unevaluated for lack of full context)` : ""
+    }`,
   });
 
   // A bad key or an exhausted quota fails the same way on every remaining
@@ -648,6 +665,7 @@ export async function filterCandidatesWithSage(
     if (d.error && !errors.includes(d.error)) errors.push(d.error);
   }
   const errorCount = decisions.filter((d) => d.error).length;
+  const unevaluatedCount = decisions.filter((d) => d.unevaluated).length;
 
   const filteredCount = decisions.filter((d) => d.filtered).length;
   const retainedCount = decisions.length - filteredCount;
@@ -665,6 +683,7 @@ export async function filterCandidatesWithSage(
     totalCandidates: decisions.length,
     errorCount,
     errors,
+    unevaluatedCount,
     decisions,
   };
 }

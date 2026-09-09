@@ -248,6 +248,12 @@ export async function process(params: {
    * silent about a gate that never ran.
    */
   sageGateErrors?: { count: number; messages: string[] };
+  /**
+   * Candidates the gate never sent to Sage because it could not build a payload
+   * covering them. They are retained, so a non-zero count means the printed
+   * filtered total covers fewer candidates than the run scanned.
+   */
+  sageGateUnevaluated?: number;
   /** Files skipped entirely because the gate left them with no candidates. */
   sageGateSkippedFiles?: number;
 }> {
@@ -657,6 +663,7 @@ export async function process(params: {
 
     let candidatesFilteredBySage: number | undefined;
     let sageGateErrors: { count: number; messages: string[] } | undefined;
+    let sageGateUnevaluated: number | undefined;
     let sageGateSkippedFiles: number | undefined;
     let gatedCandidatesByFile: Map<string, CandidateMatch[]> | undefined;
     if (params.sageGate) {
@@ -673,6 +680,13 @@ export async function process(params: {
         type: "sage_gate",
         message: `filtered ${candidatesFilteredBySage} candidate(s) (${gateResult.retainedCount} remaining across ${toProcess.length} file(s))`,
       });
+      if (gateResult.unevaluatedCount > 0) {
+        sageGateUnevaluated = gateResult.unevaluatedCount;
+        emitProgress({
+          type: "sage_gate",
+          message: `${gateResult.unevaluatedCount} candidate(s) were kept without asking Sage — the gate could not build context covering them`,
+        });
+      }
       if (gateResult.errorCount > 0) {
         sageGateErrors = { count: gateResult.errorCount, messages: gateResult.errors };
         emitProgress({
@@ -721,6 +735,7 @@ export async function process(params: {
           errorBatchCount: 0,
           candidatesFilteredBySage,
           sageGateErrors,
+          sageGateUnevaluated,
           sageGateSkippedFiles,
         };
       }
@@ -1019,6 +1034,7 @@ export async function process(params: {
       costLimitReached,
       candidatesFilteredBySage,
       sageGateErrors,
+      sageGateUnevaluated,
       sageGateSkippedFiles,
     };
   } catch (err) {
