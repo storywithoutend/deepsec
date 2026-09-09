@@ -490,9 +490,25 @@ export async function filterCandidatesWithSage(
     }
   };
 
+  // A candidate whose context is already known to be partial can only be
+  // retained, so asking Sage about it would buy an answer the gate is required
+  // to ignore. Record the retain locally and bill only for the rest.
+  const evaluable: ItemToEvaluate[] = [];
+  for (const item of items) {
+    if (item.partialContext) {
+      decisions.push({
+        candidate: item.candidate,
+        filePath: item.filePath,
+        filtered: false,
+      });
+    } else {
+      evaluable.push(item);
+    }
+  }
+
   params.onProgress?.({
     type: "sage_gate",
-    message: `Evaluating ${items.length} candidate(s) in chunks of ${batchSize}…`,
+    message: `Evaluating ${evaluable.length} candidate(s) in chunks of ${batchSize}…`,
   });
 
   // A bad key or an exhausted quota fails the same way on every remaining
@@ -501,9 +517,12 @@ export async function filterCandidatesWithSage(
   // payload) stay chunk-local — the next chunk can still succeed.
   let permanentError: string | undefined;
 
+  let evaluated = 0;
+
   // Process items in chunks
-  for (let i = 0; i < items.length; i += batchSize) {
-    const chunk = items.slice(i, i + batchSize);
+  for (let i = 0; i < evaluable.length; i += batchSize) {
+    const chunk = evaluable.slice(i, i + batchSize);
+    evaluated += chunk.length;
 
     if (permanentError) {
       recordUnevaluated(chunk, permanentError);
@@ -596,7 +615,7 @@ export async function filterCandidatesWithSage(
 
     params.onProgress?.({
       type: "sage_gate",
-      message: `${decisions.length}/${items.length} candidate(s) evaluated (${decisions.filter((d) => d.filtered).length} filtered so far)`,
+      message: `${evaluated}/${evaluable.length} candidate(s) evaluated (${decisions.filter((d) => d.filtered).length} filtered so far)`,
     });
   }
 

@@ -381,8 +381,9 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
-      expect(capturedContent).not.toContain("lines 12, 40, 88, 140");
-      expect(result.decisions[0].answer).toBe("yes");
+      // The verdict could only ever be ignored, so the request is never made.
+      expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
+      expect(capturedContent).toBe("");
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidatesByFile.get("pkg/crypto/util.go")).toEqual([candidate]);
     });
@@ -1069,22 +1070,19 @@ describe("Sage candidate gate", () => {
         }),
       };
 
-      await filterCandidatesWithSage({
+      const result = await filterCandidatesWithSage({
         records: [record],
         rootPath: tmpDir,
         sageClient: mockSageClient as any,
       });
 
-      const header = capturedContent.split("\n")[0];
-      const advertised = (header.match(/lines ([\d, ]+)\)/)?.[1] ?? "")
-        .split(", ")
-        .map((n) => Number(n));
-      expect(advertised.length).toBeGreaterThan(0);
-      expect(advertised.length).toBeLessThan(hits.length);
-      // Every advertised hit is present in the content Sage was actually sent.
-      for (const line of advertised) {
-        expect(capturedContent).toContain(`line ${line}\n`);
-      }
+      // The cap left hits unsent, so no verdict could be acted on: the gate
+      // must not spend a request to buy one.
+      expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
+      expect(capturedContent).toBe("");
+      expect(result.totalCandidates).toBe(1);
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
     });
 
     it("filters a many-hit candidate once every hit fits the context window", async () => {
@@ -1131,6 +1129,7 @@ describe("Sage candidate gate", () => {
 
       // Sage saw all 40 hits, so its benign verdict applies to the whole
       // candidate — the gate must actually save the agent run here.
+      expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(1);
       expect(result.filteredCount).toBe(1);
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([]);
     });
@@ -1183,10 +1182,8 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
-      // The payload never needed the defensive clamp…
-      expect(capturedContent).not.toContain("… (truncated)");
-      // …and the hits that did not fit keep the candidate alive.
-      expect(result.decisions[0].answer).toBe("yes");
+      expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
+      expect(capturedContent).toBe("");
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
     });
@@ -1225,6 +1222,7 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
+      expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidates).toEqual([candidate]);
     });
@@ -1271,10 +1269,9 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
-      // Sage was confident the part it saw is benign, but it never saw the
-      // remaining hits — dropping the candidate would hide them from the agent.
-      expect(result.decisions[0].answer).toBe("yes");
-      expect(result.decisions[0].confidence).toBe(0.99);
+      // Sage is never consulted about a candidate it could not see whole, and
+      // the candidate stays visible to the agent.
+      expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
     });
@@ -1319,23 +1316,26 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
-      // The header must not claim coverage of lines that were never sent…
-      expect(capturedContent).toContain("File: gone.go");
-      expect(capturedContent).not.toContain("lines 12, 40, 88, 140");
-      // …and a confident benign verdict on that partial view cannot drop it.
-      expect(result.decisions[0].answer).toBe("yes");
+      // Nothing to ask about: without the file the verdict could not be used.
+      expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
+      expect(capturedContent).toBe("");
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidatesByFile.get("gone.go")).toEqual([candidate]);
     });
 
-    it("falls back to candidate snippet when file does not exist on disk", async () => {
+    it("falls back to the candidate snippet when it carries no line numbers", async () => {
+      const filePath = "src/no-lines.ts";
+      const fullPath = path.join(tmpDir, filePath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, "const unrelated = 1;\n");
+
       const candidate: CandidateMatch = {
         vulnSlug: "xss",
-        lineNumbers: [5],
+        lineNumbers: [],
         snippet: "element.innerHTML = untrusted;",
         matchedPattern: "innerHTML",
       };
-      const record = createTestRecord("does-not-exist.ts", [candidate]);
+      const record = createTestRecord(filePath, [candidate]);
 
       let capturedContent = "";
       const mockSageClient = {
@@ -1366,9 +1366,11 @@ describe("Sage candidate gate", () => {
         sageClient: mockSageClient as any,
       });
 
+      expect(mockSageClient.decideBatch).toHaveBeenCalledTimes(1);
       expect(capturedContent).toContain(
         "Candidate Match Snippet:\n```\nelement.innerHTML = untrusted;",
       );
+      expect(capturedContent).not.toContain("const unrelated = 1;");
     });
 
     it("accepts custom ruleDescriptions map or resolver function", async () => {
@@ -1404,6 +1406,7 @@ describe("Sage candidate gate", () => {
 
       await filterCandidatesWithSage({
         candidates: [candidate],
+        fileContent: fileWithLines(),
         ruleDescriptions: {
           "custom-rule-slug": "Custom proprietary security check description",
         },
@@ -1519,6 +1522,7 @@ describe("Sage candidate gate", () => {
       const messages: string[] = [];
       await filterCandidatesWithSage({
         candidates,
+        fileContent: fileWithLines(),
         batchSize: 1,
         sageClient: mockSageClient as any,
         onProgress: (p) => {
