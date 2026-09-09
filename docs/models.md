@@ -145,9 +145,11 @@ below-threshold confidence, an unparseable answer, or an API error —
 keeps the candidate, as does a verdict formed from a context window that
 could not fit every one of the candidate's matched lines, and the gate never deletes candidates from the file
 record on disk. A candidate the gate cannot show Sage in full is not sent
-at all — the verdict would have to be ignored — and the run summary
-reports those separately as `Candidates never sent to Sage`, alongside
-`Sage gate errors` for candidates whose request failed. Both lines exist
+at all, since the verdict would have to be ignored; that includes every
+candidate in a file whose contents no longer match the hash the last scan
+recorded, because the stored line numbers no longer point at the match.
+The run summary reports those separately as `Candidates never sent to
+Sage`, alongside `Sage gate errors` for candidates whose request failed. Both lines exist
 so a gate that never really asked doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`
 or `LEVANTO_API_KEY`, same as Sage triage, and runs orchestrator-side only:
 `deepsec sandbox` rejects the Sage flags — for the gate and for `--sage`

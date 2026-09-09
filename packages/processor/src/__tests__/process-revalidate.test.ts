@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,9 @@ interface Fixture {
   writeRecord: (rec: FileRecord) => void;
 }
 
+const FIXTURE_FILE_CONTENT = "// test file\n";
+const FIXTURE_FILE_HASH = crypto.createHash("sha256").update(FIXTURE_FILE_CONTENT).digest("hex");
+
 function setupProject(opts: { projectId?: string; files?: string[] } = {}): Fixture {
   const projectId = opts.projectId ?? "test-proj";
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "deepsec-proc-"));
@@ -28,7 +32,7 @@ function setupProject(opts: { projectId?: string; files?: string[] } = {}): Fixt
   for (const f of opts.files ?? []) {
     const abs = path.join(targetRoot, f);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, "// test file\n");
+    fs.writeFileSync(abs, FIXTURE_FILE_CONTENT);
   }
 
   fs.writeFileSync(
@@ -69,7 +73,7 @@ function pendingRecord(projectId: string, filePath: string): FileRecord {
     ],
     lastScannedAt: new Date().toISOString(),
     lastScannedRunId: "scan-fixture",
-    fileHash: "fixture-hash",
+    fileHash: FIXTURE_FILE_HASH,
     findings: [],
     analysisHistory: [],
     status: "pending",

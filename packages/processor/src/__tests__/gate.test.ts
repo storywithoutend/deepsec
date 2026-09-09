@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +26,13 @@ function fileWithLines(count = 60): string {
   return Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
 }
 
+function writeFile(dir: string, relPath: string, content: string): string {
+  const full = path.join(dir, relPath);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, content);
+  return hashOf(content);
+}
+
 function writeScratchRoot(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deepsec-gate-root-"));
   for (const [relPath, content] of Object.entries(files)) {
@@ -35,14 +43,22 @@ function writeScratchRoot(files: Record<string, string>): string {
   return dir;
 }
 
-function createTestRecord(filePath: string, candidates: CandidateMatch[] = []): FileRecord {
+function hashOf(content: string): string {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+function createTestRecord(
+  filePath: string,
+  candidates: CandidateMatch[] = [],
+  fileHash = "hash-test",
+): FileRecord {
   return {
     filePath,
     projectId: "test-proj",
     candidates,
     lastScannedAt: new Date().toISOString(),
     lastScannedRunId: "scan-test",
-    fileHash: "hash-test",
+    fileHash,
     findings: [],
     analysisHistory: [],
     status: "pending",
@@ -305,8 +321,8 @@ describe("Sage candidate gate", () => {
         snippet: "const staticSql = 'SELECT 1';",
         matchedPattern: "SELECT",
       };
-      const record = createTestRecord("src/queries.ts", [benignCandidate]);
       const rootPath = writeScratchRoot({ "src/queries.ts": fileWithLines() });
+      const record = createTestRecord("src/queries.ts", [benignCandidate], hashOf(fileWithLines()));
 
       const mockSageClient = {
         decideBatch: vi.fn(async () => ({
@@ -1055,10 +1071,9 @@ describe("Sage candidate gate", () => {
 
     it("extracts context from file on disk and resolves rule description", async () => {
       const filePath = "src/example.ts";
-      const fullPath = path.join(tmpDir, filePath);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(
-        fullPath,
+      const fileHash = writeFile(
+        tmpDir,
+        filePath,
         "// Header comment\nconst x = 1;\nconst query = 'SELECT ' + input;\nconst y = 2;\n",
       );
 
@@ -1068,7 +1083,7 @@ describe("Sage candidate gate", () => {
         snippet: "const query = 'SELECT ' + input;",
         matchedPattern: "SELECT",
       };
-      const record = createTestRecord(filePath, [candidate]);
+      const record = createTestRecord(filePath, [candidate], fileHash);
 
       let capturedContent = "";
       const mockSageClient = {
@@ -1106,10 +1121,9 @@ describe("Sage candidate gate", () => {
 
     it("advertises only the hit lines the sent context actually covers", async () => {
       const filePath = "src/many-hits.ts";
-      const fullPath = path.join(tmpDir, filePath);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(
-        fullPath,
+      const fileHash = writeFile(
+        tmpDir,
+        filePath,
         `${Array.from({ length: 4000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
       );
 
@@ -1120,7 +1134,7 @@ describe("Sage candidate gate", () => {
         snippet: "line 20",
         matchedPattern: "crypto",
       };
-      const record = createTestRecord(filePath, [candidate]);
+      const record = createTestRecord(filePath, [candidate], fileHash);
 
       let capturedContent = "";
       const mockSageClient = {
@@ -1165,10 +1179,9 @@ describe("Sage candidate gate", () => {
 
     it("filters a many-hit candidate once every hit fits the context window", async () => {
       const filePath = "src/many-but-covered.ts";
-      const fullPath = path.join(tmpDir, filePath);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(
-        fullPath,
+      const fileHash = writeFile(
+        tmpDir,
+        filePath,
         `${Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
       );
 
@@ -1178,7 +1191,7 @@ describe("Sage candidate gate", () => {
         snippet: "line 20",
         matchedPattern: "crypto",
       };
-      const record = createTestRecord(filePath, [candidate]);
+      const record = createTestRecord(filePath, [candidate], fileHash);
 
       const mockSageClient = {
         decideBatch: vi.fn(async () => ({
@@ -1215,11 +1228,10 @@ describe("Sage candidate gate", () => {
 
     it("retains a candidate whose context was cut by the character budget", async () => {
       const filePath = "src/wide-lines.ts";
-      const fullPath = path.join(tmpDir, filePath);
       const wide = "x".repeat(300);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(
-        fullPath,
+      const fileHash = writeFile(
+        tmpDir,
+        filePath,
         `${Array.from({ length: 2000 }, (_, i) => `${wide} ${i + 1}`).join("\n")}\n`,
       );
 
@@ -1230,7 +1242,7 @@ describe("Sage candidate gate", () => {
         snippet: `${wide} 20`,
         matchedPattern: "crypto",
       };
-      const record = createTestRecord(filePath, [candidate]);
+      const record = createTestRecord(filePath, [candidate], fileHash);
 
       let capturedContent = "";
       const mockSageClient = {
@@ -1308,10 +1320,9 @@ describe("Sage candidate gate", () => {
 
     it("retains a candidate whose hits did not all fit the context window", async () => {
       const filePath = "src/partial.ts";
-      const fullPath = path.join(tmpDir, filePath);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(
-        fullPath,
+      const fileHash = writeFile(
+        tmpDir,
+        filePath,
         `${Array.from({ length: 4000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
       );
 
@@ -1321,7 +1332,7 @@ describe("Sage candidate gate", () => {
         snippet: "line 20",
         matchedPattern: "crypto",
       };
-      const record = createTestRecord(filePath, [candidate]);
+      const record = createTestRecord(filePath, [candidate], fileHash);
 
       const mockSageClient = {
         decideBatch: vi.fn(async () => ({
@@ -1351,6 +1362,51 @@ describe("Sage candidate gate", () => {
       // Sage is never consulted about a candidate it could not see whole, and
       // the candidate stays visible to the agent.
       expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
+      expect(result.filteredCount).toBe(0);
+      expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
+    });
+
+    it("retains a candidate whose file changed since it was scanned", async () => {
+      const filePath = "src/shifted.ts";
+      writeFile(tmpDir, filePath, "// inserted header\n// inserted header\nconst safe = 1;\n");
+
+      const candidate: CandidateMatch = {
+        vulnSlug: "sql-injection",
+        // Line 3 held the match when the record was written; it holds unrelated
+        // code now, so the extract cannot be shown to cover the candidate.
+        lineNumbers: [3],
+        snippet: "db.query(`SELECT * FROM u WHERE id=${req.query.id}`)",
+        matchedPattern: "SELECT",
+      };
+      const record = createTestRecord(filePath, [candidate], hashOf("the file as scanned\n"));
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "benign_false_positive",
+                    kind: "yesno",
+                    result: { answer: "yes", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+          ],
+        })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        records: [record],
+        rootPath: tmpDir,
+        sageClient: mockSageClient as any,
+      });
+
+      expect(mockSageClient.decideBatch).not.toHaveBeenCalled();
+      expect(result.unevaluatedCount).toBe(1);
       expect(result.filteredCount).toBe(0);
       expect(result.retainedCandidatesByFile.get(filePath)).toEqual([candidate]);
     });
@@ -1405,9 +1461,7 @@ describe("Sage candidate gate", () => {
 
     it("falls back to the candidate snippet when it carries no line numbers", async () => {
       const filePath = "src/no-lines.ts";
-      const fullPath = path.join(tmpDir, filePath);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(fullPath, "const unrelated = 1;\n");
+      const fileHash = writeFile(tmpDir, filePath, "const unrelated = 1;\n");
 
       const candidate: CandidateMatch = {
         vulnSlug: "xss",
@@ -1415,7 +1469,7 @@ describe("Sage candidate gate", () => {
         snippet: "element.innerHTML = untrusted;",
         matchedPattern: "innerHTML",
       };
-      const record = createTestRecord(filePath, [candidate]);
+      const record = createTestRecord(filePath, [candidate], fileHash);
 
       let capturedContent = "";
       const mockSageClient = {
@@ -1518,12 +1572,16 @@ describe("Sage candidate gate", () => {
         matchedPattern: "innerHTML",
       };
 
-      const record1 = createTestRecord("file1.ts", [benignCand1, realCand]);
-      const record2 = createTestRecord("file2.ts", [benignCand2]);
       const rootPath = writeScratchRoot({
         "file1.ts": fileWithLines(),
         "file2.ts": fileWithLines(),
       });
+      const record1 = createTestRecord(
+        "file1.ts",
+        [benignCand1, realCand],
+        hashOf(fileWithLines()),
+      );
+      const record2 = createTestRecord("file2.ts", [benignCand2], hashOf(fileWithLines()));
 
       const mockSageClient = {
         decideBatch: vi.fn(async (req: any) => ({

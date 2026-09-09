@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { CandidateMatch, FileRecord } from "@deepsec/core";
@@ -364,6 +365,38 @@ export async function filterCandidatesWithSage(
 
   const items: ItemToEvaluate[] = [];
 
+  const pushItem = (
+    candidate: CandidateMatch,
+    filePath: string | undefined,
+    fileContent: string | undefined,
+  ) => {
+    let surroundingContext: string | undefined;
+    // No file content means the payload is the snippet alone, which cannot be
+    // shown to cover the candidate's hits — such a view can only retain.
+    let contextLineNumbers = fileContent ? candidate.lineNumbers : undefined;
+    let partialContext = !fileContent || candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
+    if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
+      const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
+      surroundingContext = extracted.text;
+      contextLineNumbers = extracted.coveredLines;
+      partialContext ||= extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
+    }
+
+    items.push({
+      candidate,
+      filePath,
+      content: buildCandidateGateContent({
+        snippet: candidate.snippet,
+        surroundingContext: surroundingContext ?? candidate.snippet,
+        ruleDescription: resolveDescription(candidate.vulnSlug),
+        vulnSlug: candidate.vulnSlug,
+        filePath,
+        lineNumbers: contextLineNumbers,
+      }),
+      partialContext,
+    });
+  };
+
   if (params.records) {
     for (const record of params.records) {
       if (!record.candidates || record.candidates.length === 0) continue;
@@ -381,35 +414,16 @@ export async function filterCandidatesWithSage(
         }
       }
 
+      // The record's line numbers describe the file as scanned. If the file has
+      // changed since, the code at those lines is no longer the match, so the
+      // extract cannot be shown to cover the candidate either.
+      if (fileContent !== undefined && record.fileHash) {
+        const currentHash = crypto.createHash("sha256").update(fileContent).digest("hex");
+        if (currentHash !== record.fileHash) fileContent = undefined;
+      }
+
       for (const candidate of record.candidates) {
-        let surroundingContext: string | undefined;
-        // No file content means the payload is the snippet alone, which cannot
-        // be shown to cover the candidate's hits — such a view can only retain.
-        let contextLineNumbers = fileContent ? candidate.lineNumbers : undefined;
-        let partialContext = !fileContent || candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
-        if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
-          const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
-          surroundingContext = extracted.text;
-          contextLineNumbers = extracted.coveredLines;
-          partialContext ||= extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
-        }
-
-        const ruleDesc = resolveDescription(candidate.vulnSlug);
-        const content = buildCandidateGateContent({
-          snippet: candidate.snippet,
-          surroundingContext: surroundingContext ?? candidate.snippet,
-          ruleDescription: ruleDesc,
-          vulnSlug: candidate.vulnSlug,
-          filePath: record.filePath,
-          lineNumbers: contextLineNumbers,
-        });
-
-        items.push({
-          candidate,
-          filePath: record.filePath,
-          content,
-          partialContext,
-        });
+        pushItem(candidate, record.filePath, fileContent);
       }
     }
   } else if (params.candidates) {
@@ -421,37 +435,12 @@ export async function filterCandidatesWithSage(
           : path.join(params.rootPath, params.filePath);
         fileContent = fs.readFileSync(fullPath, "utf-8");
       } catch {
-        // Ignored — the snippet-only path below keeps the candidate.
+        // Ignored — the snippet-only path keeps the candidate.
       }
     }
 
     for (const candidate of params.candidates) {
-      let surroundingContext: string | undefined;
-      let contextLineNumbers = fileContent ? candidate.lineNumbers : undefined;
-      let partialContext = !fileContent || candidate.snippet.length > GATE_BLOCK_CHAR_LIMIT;
-      if (fileContent && candidate.lineNumbers && candidate.lineNumbers.length > 0) {
-        const extracted = extractCandidateContext(fileContent, candidate.lineNumbers);
-        surroundingContext = extracted.text;
-        contextLineNumbers = extracted.coveredLines;
-        partialContext ||= extracted.coveredLines.length < new Set(candidate.lineNumbers).size;
-      }
-
-      const ruleDesc = resolveDescription(candidate.vulnSlug);
-      const content = buildCandidateGateContent({
-        snippet: candidate.snippet,
-        surroundingContext: surroundingContext ?? candidate.snippet,
-        ruleDescription: ruleDesc,
-        vulnSlug: candidate.vulnSlug,
-        filePath: params.filePath,
-        lineNumbers: contextLineNumbers,
-      });
-
-      items.push({
-        candidate,
-        filePath: params.filePath,
-        content,
-        partialContext,
-      });
+      pushItem(candidate, params.filePath, fileContent);
     }
   }
 
