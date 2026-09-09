@@ -330,6 +330,65 @@ describe("processor with stub agent", () => {
     expect(rec.candidates).toHaveLength(1);
   });
 
+  it("process() keeps an already-analyzed file analyzed when the gate skips it in force mode", async () => {
+    const fx = setupProject({ files: ["app.ts"] });
+    const rec = pendingRecord(fx.projectId, "app.ts");
+    rec.status = "analyzed";
+    rec.findings = [
+      {
+        severity: "CRITICAL",
+        vulnSlug: "auth-bypass",
+        title: "prior finding",
+        description: "found by an earlier run",
+        lineNumbers: [1],
+        recommendation: "fix it",
+        confidence: "high",
+      },
+    ];
+    fx.writeRecord(rec);
+
+    const stub = new StubAgent();
+    setLoadedConfig(
+      defineConfig({
+        projects: [{ id: fx.projectId, root: fx.targetRoot }],
+        plugins: [{ name: "stub", agents: [stub] }],
+      }),
+    );
+
+    const mockSageClient = {
+      decideBatch: vi.fn(async (req: any) => ({
+        results: req.requests.map(() => ({
+          answers: [
+            {
+              ok: true,
+              result: {
+                id: "benign_false_positive",
+                kind: "yesno",
+                result: { answer: "yes", confidence: 0.99 },
+              },
+            },
+          ],
+        })),
+      })),
+    };
+
+    const result = await processProject({
+      projectId: fx.projectId,
+      agentType: "stub",
+      filePaths: ["app.ts"],
+      sageGate: true,
+      sageClient: mockSageClient as any,
+    });
+
+    expect(result.sageGateSkippedFiles).toBe(1);
+    // Releasing the claim must not demote the file: `report` and `metrics`
+    // only count `analyzed` records, so its CRITICAL finding would vanish.
+    const after = fx.readRecord("app.ts");
+    expect(after.status).toBe("analyzed");
+    expect(after.lockedByRunId).toBeUndefined();
+    expect(after.findings).toHaveLength(1);
+  });
+
   it("process() reports Sage gate failures instead of silently filtering nothing", async () => {
     const fx = setupProject({ files: ["app.ts"] });
     fx.writeRecord(pendingRecord(fx.projectId, "app.ts"));

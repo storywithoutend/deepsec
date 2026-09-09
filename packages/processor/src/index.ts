@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { CandidateMatch, FileRecord, Severity } from "@deepsec/core";
+import type { CandidateMatch, FileRecord, FileStatus, Severity } from "@deepsec/core";
 import {
   acquireProcessLock,
   completeRun,
@@ -601,6 +601,7 @@ export async function process(params: {
     // primitive and the 1h stale-lock cutoff.
     const lockedAt = new Date().toISOString();
     const claimed: FileRecord[] = [];
+    const preClaimStatus = new Map<string, FileStatus>();
     const inForceMode = !!reinvestigate || params.filePaths !== undefined;
     const releaseProcessLock = await acquireProcessLock(projectId, runId);
     try {
@@ -625,6 +626,10 @@ export async function process(params: {
           continue;
         }
 
+        preClaimStatus.set(
+          record.filePath,
+          current.status === "processing" ? "pending" : current.status,
+        );
         current.status = "processing";
         current.lockedByRunId = runId;
         current.lockedAt = lockedAt;
@@ -678,15 +683,17 @@ export async function process(params: {
       // A file whose every candidate was judged benign has nothing left for
       // the agent to look at. Left in `toProcess` it would be batched as a
       // record with zero candidates, which the prompt renders as an unbounded
-      // holistic review — the opposite of what the gate is for. Release the
-      // claim (same as the cost/quota stop path) so the lock doesn't linger.
+      // holistic review — the opposite of what the gate is for. Releasing the
+      // claim restores the status the record had before this run took it, so
+      // an already-analyzed file re-run under `--reinvestigate` / direct mode
+      // doesn't get demoted out of `report` and `metrics`.
       const skipped = toProcess.filter(
         (r) =>
           r.candidates.length > 0 && (gatedCandidatesByFile?.get(r.filePath)?.length ?? 0) === 0,
       );
       if (skipped.length > 0) {
         for (const record of skipped) {
-          record.status = "pending";
+          record.status = preClaimStatus.get(record.filePath) ?? "pending";
           record.lockedByRunId = undefined;
           record.lockedAt = undefined;
           writeFileRecord(record);

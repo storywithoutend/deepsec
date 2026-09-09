@@ -432,7 +432,7 @@ describe("assertSageCredential", () => {
 
   it("throws actionable error when neither key is set", () => {
     expect(() => assertSageCredential({ env: {} as any })).toThrow(
-      /Missing API key for Levanto Sage triage/,
+      /Missing API key for Levanto Sage\./,
     );
   });
 });

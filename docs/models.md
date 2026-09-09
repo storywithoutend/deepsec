@@ -141,12 +141,25 @@ instead of being handed to the agent for an open-ended review.
 The gate is fail-open and non-destructive. Anything other than a
 confident benign verdict — a plausible-vulnerability answer, a missing or
 below-threshold confidence, an unparseable answer, or an API error —
-keeps the candidate, and candidates the gate skipped are never deleted
-from the file record on disk, so a later run without `--sage-gate`
-investigates them normally. Candidates the gate could not evaluate are
-reported as `Sage gate errors` in the run summary so a gate that silently
-never ran doesn't read as "nothing was benign". `--sage-gate` needs
-`SAGE_API_KEY` or `LEVANTO_API_KEY`, same as Sage triage.
+keeps the candidate, and the gate never deletes candidates from the file
+record on disk. Candidates the gate could not evaluate are reported as
+`Sage gate errors` in the run summary so a gate that silently never ran
+doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`
+or `LEVANTO_API_KEY`, same as Sage triage.
+
+What that means across runs depends on whether the gate cleared the whole
+file:
+
+- **Every candidate filtered** — the file is never handed to the agent
+  and keeps the status it had before the run, so it stays selectable. A
+  later plain `process` investigates it normally, and a later
+  `--sage-gate` run re-sends it to Sage and skips it again: an all-benign
+  file is re-gated on every run (a small repeated Sage cost, never an
+  agent cost) rather than being recorded as decided.
+- **Some candidates filtered** — the agent investigates the rest and the
+  file ends the run `analyzed`, which takes it out of the default work
+  set. The filtered candidates are still on the record, but no later run
+  picks them up on its own; use `--reinvestigate` to look at them again.
 
 ## Thinking level
 
