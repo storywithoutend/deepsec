@@ -66,13 +66,23 @@ export function extractCandidateContext(
 ): { text: string; coveredLines: number[] } {
   const lines = content.split("\n");
   if (lines.length === 0) return { text: "", coveredLines: [] };
+  // A record can outlive the file it was scanned from, so hits past the current
+  // end of file are dropped rather than turned into inverted, budget-inflating
+  // spans. They stay out of `coveredLines`, which keeps the candidate retained.
   const validLines = Array.from(
-    new Set(lineNumbers.filter((n) => typeof n === "number" && !Number.isNaN(n) && n > 0)),
+    new Set(
+      lineNumbers.filter(
+        (n) => typeof n === "number" && !Number.isNaN(n) && n > 0 && n <= lines.length,
+      ),
+    ),
   ).sort((a, b) => a - b);
   if (validLines.length === 0) return { text: content.slice(0, 1000), coveredLines: [] };
 
+  // Windows shrink to the matched line alone when a candidate carries many
+  // hits, so the fixed budget covers as many of them as possible instead of
+  // reserving padding for the first few and truncating the rest.
   const perHit = Math.max(1, Math.floor(maxLines / validLines.length));
-  const half = Math.max(1, Math.min(contextLines, Math.floor((perHit - 1) / 2)));
+  const half = Math.min(contextLines, Math.floor((perHit - 1) / 2));
 
   const spans: { start: number; end: number }[] = [];
   for (const line of validLines) {

@@ -74,9 +74,31 @@ describe("Sage candidate gate", () => {
       expect(text).not.toContain("line 200");
     });
 
-    it("reports only the hits it actually sent when the cap truncates windows", () => {
+    it("covers every hit of a many-hit candidate by shrinking the windows", () => {
       const content = Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n");
       const hits = Array.from({ length: 40 }, (_, i) => 20 + i * 40);
+      const { text, coveredLines } = extractCandidateContext(content, hits);
+
+      const codeLines = text.split("\n").filter((l: string) => l !== "…");
+      expect(codeLines.length).toBeLessThanOrEqual(GATE_CONTEXT_LINE_LIMIT);
+      expect(coveredLines).toEqual(hits);
+    });
+
+    it("drops hit lines past the end of the file instead of inflating the budget", () => {
+      // A stale record: the file shrank after it was scanned.
+      const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
+      const hits = Array.from({ length: 60 }, (_, i) => 20 + i * 30);
+      const { text, coveredLines } = extractCandidateContext(content, hits);
+
+      const codeLines = text.split("\n").filter((l: string) => l !== "…");
+      expect(codeLines.length).toBeLessThanOrEqual(GATE_CONTEXT_LINE_LIMIT);
+      expect(coveredLines).toEqual(hits.filter((h) => h <= 100));
+      expect(codeLines.every((l: string) => l.startsWith("line "))).toBe(true);
+    });
+
+    it("reports only the hits it actually sent when the cap truncates windows", () => {
+      const content = Array.from({ length: 4000 }, (_, i) => `line ${i + 1}`).join("\n");
+      const hits = Array.from({ length: 80 }, (_, i) => 20 + i * 40);
       const { text, coveredLines } = extractCandidateContext(content, hits);
 
       const codeLines = text.split("\n").filter((l: string) => l !== "…");
@@ -907,10 +929,10 @@ describe("Sage candidate gate", () => {
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(
         fullPath,
-        `${Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
+        `${Array.from({ length: 4000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
       );
 
-      const hits = Array.from({ length: 40 }, (_, i) => 20 + i * 40);
+      const hits = Array.from({ length: 80 }, (_, i) => 20 + i * 40);
       const candidate: CandidateMatch = {
         vulnSlug: "crypto-usage",
         lineNumbers: hits,
@@ -960,8 +982,8 @@ describe("Sage candidate gate", () => {
       }
     });
 
-    it("retains a candidate whose hits did not all fit the context window", async () => {
-      const filePath = "src/partial.ts";
+    it("filters a many-hit candidate once every hit fits the context window", async () => {
+      const filePath = "src/many-but-covered.ts";
       const fullPath = path.join(tmpDir, filePath);
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(
@@ -972,6 +994,54 @@ describe("Sage candidate gate", () => {
       const candidate: CandidateMatch = {
         vulnSlug: "crypto-usage",
         lineNumbers: Array.from({ length: 40 }, (_, i) => 20 + i * 40),
+        snippet: "line 20",
+        matchedPattern: "crypto",
+      };
+      const record = createTestRecord(filePath, [candidate]);
+
+      const mockSageClient = {
+        decideBatch: vi.fn(async () => ({
+          results: [
+            {
+              answers: [
+                {
+                  ok: true,
+                  result: {
+                    id: "benign_false_positive",
+                    kind: "yesno",
+                    result: { answer: "yes", confidence: 0.99 },
+                  },
+                },
+              ],
+            },
+          ],
+        })),
+      };
+
+      const result = await filterCandidatesWithSage({
+        records: [record],
+        rootPath: tmpDir,
+        sageClient: mockSageClient as any,
+      });
+
+      // Sage saw all 40 hits, so its benign verdict applies to the whole
+      // candidate — the gate must actually save the agent run here.
+      expect(result.filteredCount).toBe(1);
+      expect(result.retainedCandidatesByFile.get(filePath)).toEqual([]);
+    });
+
+    it("retains a candidate whose hits did not all fit the context window", async () => {
+      const filePath = "src/partial.ts";
+      const fullPath = path.join(tmpDir, filePath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(
+        fullPath,
+        `${Array.from({ length: 4000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`,
+      );
+
+      const candidate: CandidateMatch = {
+        vulnSlug: "crypto-usage",
+        lineNumbers: Array.from({ length: 80 }, (_, i) => 20 + i * 40),
         snippet: "line 20",
         matchedPattern: "crypto",
       };
