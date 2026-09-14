@@ -1,6 +1,6 @@
 ---
 title: "Models"
-description: "Choose Codex, Claude, or Pi for process and revalidate runs, and compare models under the same workload."
+description: "Choose Codex, Claude, or Pi for process and revalidate runs, choose Claude or Levanto Sage for triage, and compare models under the same workload."
 ---
 
 deepsec talks to LLMs through interchangeable agent backends:
@@ -10,7 +10,8 @@ deepsec talks to LLMs through interchangeable agent backends:
 | `codex` (default)           | `gpt-5.5`             | `process`, `revalidate`      |
 | `claude`                    | `claude-opus-4-8`     | `process`, `revalidate`      |
 | `pi`                        | `zai/glm-5.2`        | `process`, `revalidate` |
-| `claude` (triage)           | `claude-sonnet-4-6`   | `triage` (Claude-only)       |
+| `claude` (triage)           | `claude-sonnet-4-6`   | `triage` (default)           |
+| `sage` (triage)             | `levanto-sage-v0.8`   | `triage --sage`              |
 
 Interactive one-shot setup recommends five benchmark-backed combinations:
 GPT-5.6 Sol, Claude Opus 5, Kimi K3, Grok 4.5, and the current DeepSeek entry.
@@ -76,14 +77,110 @@ pnpm deepsec process --project-id my-app --agent pi
 # Pi with an AI SDK / AI Gateway style model id:
 pnpm deepsec process --project-id my-app --agent pi --model zai/glm-5.2
 
-# Triage uses Claude; pass a cheaper model if you want:
+# Triage on Claude (default); pass a cheaper model if you want:
 pnpm deepsec triage --project-id my-app --model claude-haiku-4-5
+
+# Triage on the Levanto Sage decision model:
+pnpm deepsec triage --project-id my-app --sage
 ```
 
 `--agent`, `--model`, and `--thinking-level` are also accepted on `setup` and
 `revalidate`. Setup persists the interactive choice as `defaultAgent`,
 `defaultModel`, and `defaultThinkingLevel`, checkpoints the exact combination,
 and invalidates affected phases when it changes.
+
+## Triage providers
+
+`triage` buckets findings into P0/P1/P2/skip without re-reading the code,
+and runs on one of two providers:
+
+- `--provider claude` (default) — the Claude Agent SDK on
+  `claude-sonnet-4-6`, or any model you pass with `--model`.
+- `--provider sage` — the [Levanto Sage](https://levanto.ai) decision
+  model, which classifies a finding in ~100ms and returns a calibrated
+  confidence score. `--sage` is the shorthand for
+  `--provider sage --model levanto-sage-v0.8`. Sage exposes exactly one
+  model, so `--model` on this provider accepts no other value.
+
+These flags apply to the sage provider only; the claude provider rejects
+them rather than reporting a setting that does nothing:
+
+| Flag | Effect |
+|---|---|
+| `--latency-mode <quality\|fast>` | Sage speed/quality dial. Default: `quality`. |
+| `--min-confidence <0-1>` | Re-triage any Sage decision below this confidence with Claude. |
+| `--no-claude-fallback` | Never re-triage with Claude; low-confidence, undecided, and failed findings are left untriaged instead. |
+
+Each finding records the model that actually decided it, so a run with a
+confidence floor writes a mix of `levanto-sage-v0.8` and
+`claude-sonnet-4-6`; the confidence Sage reported is persisted on the
+finding (see [data-layout](data-layout.md)). Sage triage needs
+`SAGE_API_KEY` or `LEVANTO_API_KEY` (see
+[configuration](configuration.md)), and that check is not skipped by the
+local-subscription route. If the Claude fallback is enabled but no Claude
+credential is available, deepsec warns and disables the fallback instead
+of failing. An account-scoped Sage error — bad key or
+exhausted quota — aborts the run rather than silently redirecting the
+whole corpus to Claude; a rejected request is scoped to its own batch and
+falls back like any other batch failure.
+
+## Sage candidate gate
+
+`process --sage-gate` puts the same Levanto Sage decision model in front
+of the coding agent: every scanner candidate the gate can show in full is
+sent to Sage in `fast` latency mode with its snippet, surrounding
+context, and the matcher's rule description, and Sage answers one question — is this an obvious
+benign false positive? Candidates it calls benign are hidden from the
+agent's prompt, and a file left with no candidates is skipped entirely
+instead of being handed to the agent for an open-ended review.
+
+| Flag | Effect |
+|---|---|
+| `--sage-gate` | Filter obvious benign scanner candidates with Sage before agent runs. |
+| `--sage-gate-confidence <0-1>` | Confidence a "benign" answer needs before a candidate is dropped. Default: `0.85`. Requires `--sage-gate`. |
+
+The gate is fail-open and non-destructive. Anything other than a
+confident benign verdict — a plausible-vulnerability answer, a missing or
+below-threshold confidence, an unparseable answer, or an API error —
+keeps the candidate, as does a verdict formed from a context window that
+could not fit every one of the candidate's matched lines, and the gate never deletes candidates from the file
+record on disk. A candidate the gate cannot show Sage in full is not sent
+at all, since the verdict would have to be ignored; that includes every
+candidate in a file whose contents no longer match the hash the last scan
+recorded, because the stored line numbers no longer point at the match.
+The run summary reports those separately as `Candidates never sent to
+Sage`, alongside `Sage gate errors` for candidates whose request failed. Both lines exist
+so a gate that never really asked doesn't read as "nothing was benign". `--sage-gate` needs `SAGE_API_KEY`
+or `LEVANTO_API_KEY`, same as Sage triage, and runs orchestrator-side only:
+`deepsec sandbox` rejects the Sage flags — for the gate and for `--sage`
+triage alike — rather than forwarding them into microVMs that have
+neither the credential nor egress to Sage.
+
+What that means across runs depends on whether the gate cleared the whole
+file:
+
+- **Every candidate filtered** — the file is never handed to the agent
+  and keeps whatever status it had before the run. A file that was
+  pending stays pending, so it remains in the default work set: a later
+  plain `process` investigates it normally, and a later `--sage-gate` run
+  re-sends it to Sage and skips it again (a small repeated Sage cost,
+  never an agent cost) rather than recording the verdict as decided. A
+  file that was already `analyzed` — only reachable in force mode, via
+  `--reinvestigate` or `process --files` — stays `analyzed`, so it keeps
+  counting in `report` and `metrics` and needs `--reinvestigate` to be
+  looked at again.
+
+  Because file selection is deterministic, this interacts with `--limit`:
+  fully gated files stay at the front of the work set and are re-picked by
+  every subsequent `--sage-gate --limit N` run, so those slots are spent
+  re-gating them instead of reaching later pending files. If a run reports
+  many skipped files and few analyses, raise `--limit`, narrow the run with
+  `--filter`, or drop `--sage-gate` for a pass so those files reach a
+  terminal status.
+- **Some candidates filtered** — the agent investigates the rest and the
+  file ends the run `analyzed`, which takes it out of the default work
+  set. The filtered candidates are still on the record, but no later run
+  picks them up on its own; use `--reinvestigate` to look at them again.
 
 ## Thinking level
 
@@ -173,9 +270,10 @@ repeatable `--ai-header name=value` remain available as Pi runtime overrides.
 
 ### `claude-sonnet-4-6` for `triage`
 
-Triage buckets findings into P0/P1/P2/skip without re-reading the code.
-It just looks at the finding text. That's a cheap task; Opus is
-overkill. Sonnet keeps `triage` at ~1¢/finding.
+Triage just looks at the finding text, never the code. That's a cheap
+task; Opus is overkill. Sonnet keeps `triage` at ~1¢/finding. For a
+faster, confidence-scored alternative, see
+[Triage providers](#triage-providers).
 
 ## Refusals
 

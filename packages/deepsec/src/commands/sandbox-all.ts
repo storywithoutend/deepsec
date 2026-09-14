@@ -12,7 +12,7 @@ import { resolveAgentType } from "../resolve-agent-type.js";
 import { orchestrate } from "../sandbox/orchestrator.js";
 import { partitionFiles } from "../sandbox/partitioner.js";
 import type { SandboxConfig, SandboxSubcommand } from "../sandbox/types.js";
-import { extractReinvestigate } from "./sandbox-process.js";
+import { assertNoSageFlags, extractReinvestigate } from "./sandbox-process.js";
 
 // Mirror of VALID_COMMANDS in sandbox-process.ts. Kept in sync by hand —
 // `enrich` is intentionally excluded: it runs locally (git committer
@@ -75,6 +75,8 @@ export async function sandboxAllCommand(
     args?: string[];
   },
 ) {
+  assertNoSageFlags(opts.args ?? []);
+
   if (!VALID_COMMANDS.has(subcommand as SandboxSubcommand)) {
     console.error(`Unknown sandbox-all subcommand: ${subcommand}`);
     console.error(`Valid commands: ${Array.from(VALID_COMMANDS).join(", ")}`);

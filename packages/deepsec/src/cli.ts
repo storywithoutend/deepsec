@@ -4,7 +4,7 @@ dotenvConfig({ path: ".env.local" });
 dotenvConfig(); // also load .env as fallback
 
 import { getRegistry } from "@deepsec/core";
-import { setAttributionVersion } from "@deepsec/processor";
+import { DEFAULT_SAGE_GATE_CONFIDENCE, setAttributionVersion } from "@deepsec/processor";
 import { Command } from "commander";
 import { collectRepeatable } from "./agent-config.js";
 import { enrichCommand } from "./commands/enrich.js";
@@ -348,6 +348,15 @@ program
     "--comment-out <path>",
     "Write a PR-comment-shaped markdown summary to <path> (only when findings exist)",
   )
+  .option(
+    "--sage-gate",
+    "Filter obvious benign scanner candidates using Levanto Sage before agent runs",
+  )
+  .option(
+    "--sage-gate-confidence <n>",
+    `Confidence threshold for Sage candidate gate (default: ${DEFAULT_SAGE_GATE_CONFIDENCE})`,
+    parseFloat,
+  )
   .action(processCommand);
 
 program
@@ -435,7 +444,22 @@ program
     "Project identifier (default: the only project in deepsec.config.ts; required if there are multiple)",
   )
   .option("--severity <sev>", "Severity to triage (default: MEDIUM)", "MEDIUM")
-  .option("--model <model>", "Model to use (default: claude-sonnet-4-6 — cheaper)")
+  .option("--provider <provider>", "Triage provider to use: claude (default) or sage")
+  .option("--sage", "Shorthand for --provider sage --model levanto-sage-v0.8")
+  .option("--latency-mode <mode>", "Sage latency mode: quality (default) or fast")
+  .option(
+    "--min-confidence <n>",
+    "Minimum confidence threshold for Sage triage decisions (falls back to Claude if below)",
+    parseFloat,
+  )
+  .option(
+    "--no-claude-fallback",
+    "Do not re-triage low-confidence or failed Sage findings with Claude",
+  )
+  .option(
+    "--model <model>",
+    "Model to use (default: levanto-sage-v0.8 for sage, claude-sonnet-4-6 for claude)",
+  )
   .option("--force", "Re-triage already-triaged findings")
   .option("--limit <n>", "Max findings to triage", parseInt)
   .option("--concurrency <n>", "Parallel triage batches (default: cores - 1)", parseInt)

@@ -41,6 +41,48 @@ function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
 
+function splitFlag(arg: string): [name: string, inlineValue: string | undefined] {
+  const eq = arg.indexOf("=");
+  return eq === -1 ? [arg, undefined] : [arg.slice(0, eq), arg.slice(eq + 1)];
+}
+
+const SAGE_ONLY_FLAGS = [
+  "--sage-gate",
+  "--sage-gate-confidence",
+  "--sage",
+  "--latency-mode",
+  "--min-confidence",
+  "--claude-fallback",
+  "--no-claude-fallback",
+];
+
+/**
+ * Everything Levanto Sage-backed runs orchestrator-side only: sandboxes get
+ * neither a Sage credential nor egress to the Sage host, so forwarding these
+ * flags would fail every worker at preflight after provisioning.
+ */
+export function assertNoSageFlags(args: string[]): void {
+  let flag: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const [name, inlineValue] = splitFlag(args[i]);
+    if (SAGE_ONLY_FLAGS.includes(name)) {
+      flag = args[i];
+      break;
+    }
+    if (name === "--provider" && (inlineValue ?? args[i + 1]) === "sage") {
+      flag = args[i];
+      break;
+    }
+  }
+  if (!flag) return;
+  const subject = flag.startsWith("--sage-gate") ? "Sage candidate gate" : "Sage triage";
+  console.error(
+    `${flag} is not supported in sandbox mode — the ${subject} runs orchestrator-side only.`,
+  );
+  console.error("Run the Sage-backed command locally, or drop the flag to sandbox the agent runs.");
+  process.exit(1);
+}
+
 /**
  * Extract `--reinvestigate` in its optional-arg form. Returns:
  *   undefined — flag not present
@@ -144,6 +186,8 @@ export async function sandboxCommand(subcommand: string, opts: SandboxOpts) {
     console.error(`Valid commands: ${VALID_COMMANDS.join(", ")}, collect, status`);
     process.exit(1);
   }
+
+  assertNoSageFlags(opts.args ?? []);
 
   const projectId = resolveProjectId(opts.projectId);
   const config = buildConfig(subcommand as SandboxSubcommand, projectId, opts);

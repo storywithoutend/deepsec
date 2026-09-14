@@ -1,14 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureProject, readProjectConfig } from "@deepsec/core";
-import { process as processRun } from "@deepsec/processor";
+import { DEFAULT_SAGE_GATE_CONFIDENCE, process as processRun } from "@deepsec/processor";
 import { scanFiles } from "@deepsec/scanner";
 import { buildAgentConfig } from "../agent-config.js";
 import { defaultModelForAgent } from "../agent-defaults.js";
 import { resolveFiles } from "../file-sources.js";
 import { BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW } from "../formatters.js";
 import { renderPrComment } from "../pr-comment.js";
-import { applyConfiguredModelRoute, assertAgentCredential } from "../preflight.js";
+import {
+  applyConfiguredModelRoute,
+  assertAgentCredential,
+  assertSageCredential,
+} from "../preflight.js";
 import { renderQuotaMessage } from "../quota-message.js";
 import { resolveAgentType } from "../resolve-agent-type.js";
 import { resolveProjectId, resolveProjectIdForDirect } from "../resolve-project-id.js";
@@ -53,6 +57,10 @@ function logProgress(progress: {
       }
       case "batch_complete":
         console.log(`  ${progress.message}`);
+        console.log();
+        break;
+      case "sage_gate":
+        console.log(`  ${CYAN}Sage candidate gate:${RESET} ${progress.message}`);
         console.log();
         break;
       case "all_complete":
@@ -105,6 +113,9 @@ export async function processCommand(opts: {
   /** Commander auto-injects this from `--no-ignore` (default true). */
   ignore?: boolean;
   commentOut?: string;
+  // Sage candidate gate flags
+  sageGate?: boolean;
+  sageGateConfidence?: number;
 }) {
   const isDirectMode =
     opts.diff !== undefined ||
@@ -119,7 +130,52 @@ export async function processCommand(opts: {
   return processStandardMode(opts);
 }
 
+function printSageGateSummary(result: {
+  candidatesFilteredBySage?: number;
+  sageGateUnevaluated?: number;
+  sageGateSkippedFiles?: number;
+  sageGateErrors?: { count: number; messages: string[] };
+}): void {
+  if (result.candidatesFilteredBySage !== undefined) {
+    console.log(`  Candidates filtered by Sage: ${result.candidatesFilteredBySage}`);
+  }
+  if (result.sageGateUnevaluated) {
+    console.log(
+      `  ${YELLOW}Candidates never sent to Sage: ${result.sageGateUnevaluated} (kept — no context covering every match)${RESET}`,
+    );
+  }
+  if (result.sageGateSkippedFiles) {
+    console.log(`  Files skipped by Sage gate: ${result.sageGateSkippedFiles}`);
+  }
+  if (result.sageGateErrors) {
+    console.log(
+      `  ${YELLOW}Sage gate errors: ${result.sageGateErrors.count} candidate(s) not evaluated and kept — ${result.sageGateErrors.messages.join("; ")}${RESET}`,
+    );
+  }
+}
+
+function assertSageGateOptions(opts: { sageGate?: boolean; sageGateConfidence?: number }): void {
+  if (opts.sageGateConfidence !== undefined && !opts.sageGate) {
+    throw new Error("--sage-gate-confidence requires --sage-gate");
+  }
+  if (opts.sageGateConfidence !== undefined) {
+    if (
+      Number.isNaN(opts.sageGateConfidence) ||
+      opts.sageGateConfidence < 0 ||
+      opts.sageGateConfidence > 1
+    ) {
+      throw new Error("--sage-gate-confidence must be a number between 0 and 1");
+    }
+  }
+
+  if (opts.sageGate) {
+    assertSageCredential();
+  }
+}
+
 async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
+  assertSageGateOptions(opts);
+
   const projectId = resolveProjectId(opts.projectId);
   const onlySlugs = parseCsv(opts.onlySlugs);
   const skipSlugs = parseCsv(opts.skipSlugs);
@@ -166,6 +222,10 @@ async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
   }
   if (onlySlugs) console.log(`  Only slugs: ${onlySlugs.join(", ")}`);
   if (skipSlugs) console.log(`  Skip slugs: ${skipSlugs.join(", ")}`);
+  if (opts.sageGate) {
+    const conf = opts.sageGateConfidence ?? DEFAULT_SAGE_GATE_CONFIDENCE;
+    console.log(`  Sage candidate gate: enabled (confidence threshold: ${conf})`);
+  }
   console.log();
 
   const result = await processRun({
@@ -182,12 +242,15 @@ async function processStandardMode(opts: Parameters<typeof processCommand>[0]) {
     manifestPath: opts.manifest,
     onlySlugs,
     skipSlugs,
+    sageGate: opts.sageGate,
+    sageGateConfidence: opts.sageGateConfidence,
     onProgress: logProgress,
   });
 
   console.log(`${GREEN}Processing complete.${RESET} Run: ${BOLD}${result.runId}${RESET}`);
   console.log(`  Analyses: ${result.analysisCount}`);
   console.log(`  Findings: ${result.findingCount}`);
+  printSageGateSummary(result);
   if (result.errorBatchCount > 0) {
     console.log(`  ${RED}Errored batches: ${result.errorBatchCount}${RESET}`);
   }
@@ -252,6 +315,8 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
     throw new Error(`Conflicting file sources: ${sources.join(", ")}. Pick exactly one.`);
   }
 
+  assertSageGateOptions(opts);
+
   // Warn-and-ignore options that don't apply in direct mode. The user's
   // file list IS the filter — these flags would silently subset it
   // further, which is rarely what someone passing a diff wants.
@@ -300,6 +365,10 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
   console.log(`  Files: ${resolved.filePaths.length}`);
   console.log(`  Agent: ${agentType} (${model})`);
   console.log(`  Root: ${rootPath}`);
+  if (opts.sageGate) {
+    const conf = opts.sageGateConfidence ?? DEFAULT_SAGE_GATE_CONFIDENCE;
+    console.log(`  Sage candidate gate: enabled (confidence threshold: ${conf})`);
+  }
   console.log();
 
   if (resolved.filePaths.length === 0) {
@@ -333,12 +402,15 @@ async function processDirectMode(opts: Parameters<typeof processCommand>[0]) {
     rootPathOverride: rootPath,
     filePaths: resolved.filePaths,
     source: resolved.sourceLabel,
+    sageGate: opts.sageGate,
+    sageGateConfidence: opts.sageGateConfidence,
     onProgress: logProgress,
   });
 
   console.log(`${GREEN}Processing complete.${RESET} Run: ${BOLD}${result.runId}${RESET}`);
   console.log(`  Analyses: ${result.analysisCount}`);
   console.log(`  Findings: ${result.findingCount}`);
+  printSageGateSummary(result);
   if (result.errorBatchCount > 0) {
     console.log(`  ${RED}Errored batches: ${result.errorBatchCount}${RESET}`);
   }

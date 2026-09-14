@@ -74,6 +74,7 @@ export interface RunMeta {
     fixed?: number;
     uncertain?: number;
     duplicates?: number;
+    candidatesFilteredBySage?: number;
   };
 }
 
@@ -203,6 +204,12 @@ export interface Triage {
   reasoning: string;
   triagedAt: string;
   model: string;
+  /**
+   * Calibrated confidence in `priority`, 0-1, when the triaging model
+   * reports one. Absent for models that do not (the Claude path), so
+   * consumers must treat it as optional rather than defaulting it.
+   */
+  confidence?: number;
 }
 
 export interface Finding {

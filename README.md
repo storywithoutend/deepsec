@@ -122,7 +122,7 @@ Running on a sandbox (see above) does limit the potential exposure substantially
 | `scan`          | Find candidate sites with regex matchers (fast, no AI)   |
 | `process`       | AI investigation; emits findings + recommendation        |
 | `process --diff`| PR-mode: scan + investigate only files changed in a diff |
-| `triage`        | Lightweight P0/P1/P2 classification (cheaper model)      |
+| `triage`        | Lightweight P0/P1/P2 classification (Claude, or `--sage`) |
 | `revalidate`    | Re-check existing findings; checks git history for fixes |
 | `enrich`        | Add git committer info + (with a plugin) ownership data  |
 | `report`        | Markdown + JSON summary for one project                  |

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { FileRecord, Severity } from "@deepsec/core";
+import type { CandidateMatch, FileRecord, FileStatus, Severity } from "@deepsec/core";
 import {
   acquireProcessLock,
   completeRun,
@@ -33,6 +33,7 @@ import type {
 } from "./agents/types.js";
 import { batchCandidates } from "./batch.js";
 import { enrichFileRecord } from "./enrich.js";
+import { filterCandidatesWithSage } from "./gate.js";
 import { assemblePrompt } from "./prompt/assemble.js";
 import { languagesForBatch } from "./prompt/file-language.js";
 import {
@@ -42,6 +43,7 @@ import {
   reconcileVerdicts,
   resolveDuplicateRef,
 } from "./reconcile.js";
+import type { LevantoSageClient } from "./sage/client.js";
 
 export { ClaudeAgentSdkPlugin } from "./agents/claude-agent-sdk.js";
 export { CodexAgentSdkPlugin } from "./agents/codex-sdk.js";
@@ -60,6 +62,18 @@ export {
 export type { AgentPlugin, AgentProgress } from "./agents/types.js";
 export { batchCandidates } from "./batch.js";
 export { enrich } from "./enrich.js";
+export {
+  buildCandidateGateContent,
+  type CandidateGateDecision,
+  DEFAULT_SAGE_GATE_CONFIDENCE,
+  extractSurroundingLines,
+  type FilterCandidatesParams,
+  type FilterCandidatesResult,
+  filterCandidatesWithSage,
+  getRuleDescription,
+  parseYesNoResult,
+  SAGE_GATE_QUESTION_INSTRUCTIONS,
+} from "./gate.js";
 export type { AssembleParams, AssembleResult, TechHighlight } from "./prompt/index.js";
 export {
   assemblePrompt,
@@ -82,8 +96,53 @@ export {
   reconcileVerdicts,
   resolveDuplicateRef,
 } from "./reconcile.js";
+export {
+  isRetryableSageError,
+  LevantoSageAuthError,
+  LevantoSageClient,
+  type LevantoSageClientOptions,
+  LevantoSageError,
+  LevantoSageQuotaError,
+  LevantoSageRateLimitError,
+  LevantoSageServerError,
+  LevantoSageValidationError,
+  type SageBatchAnswer,
+  type SageBatchAnswerError,
+  type SageBatchAnswerSuccess,
+  type SageBatchGroupResult,
+  type SageBatchRequest,
+  type SageBatchRequestGroup,
+  type SageBatchResponse,
+  type SageChoiceDecision,
+  type SageChoiceParams,
+  type SageChoiceQuestion,
+  type SageChoiceResult,
+  type SageDecideRequest,
+  type SageDecideResponse,
+  type SageOption,
+  type SageOptionProbability,
+  type SageQuestion,
+  type SageScaleLevel,
+  type SageScaleQuestion,
+  type SageSortQuestion,
+  type SageTagItem,
+  type SageTagsQuestion,
+  type SageYesNoQuestion,
+} from "./sage/index.js";
 export { type RunSetupTaskParams, runSetupTask } from "./setup-agent.js";
-export { triage } from "./triage.js";
+export {
+  CLAUDE_DEFAULT_MODEL,
+  formatFindingForSage,
+  SAGE_EXPLOITABILITY_OPTIONS,
+  SAGE_IMPACT_OPTIONS,
+  SAGE_MODEL_NAME,
+  SAGE_PRIORITY_OPTIONS,
+  type TriageParams,
+  type TriageProgress,
+  type TriageResult,
+  type TriageVerdict,
+  triage,
+} from "./triage.js";
 
 export function createDefaultAgentRegistry(): AgentRegistry {
   const registry = new AgentRegistry();
@@ -99,7 +158,7 @@ export function createDefaultAgentRegistry(): AgentRegistry {
 }
 
 export interface ProcessProgress {
-  type: "batch_started" | "batch_complete" | "agent_progress" | "all_complete";
+  type: "batch_started" | "batch_complete" | "agent_progress" | "all_complete" | "sage_gate";
   message: string;
   batchIndex?: number;
   totalBatches?: number;
@@ -153,6 +212,12 @@ export async function process(params: {
   onProgress?: (progress: ProcessProgress) => void;
   /** Stop claiming new batches once completed batch cost reaches this limit. */
   maxCostUsd?: number;
+  /** Filter candidates using Levanto Sage before agent investigation */
+  sageGate?: boolean;
+  /** Confidence threshold for Sage candidate gate (default: 0.85) */
+  sageGateConfidence?: number;
+  /** Optional custom Sage client instance */
+  sageClient?: LevantoSageClient;
 }): Promise<{
   runId: string;
   analysisCount: number;
@@ -175,6 +240,22 @@ export async function process(params: {
   quotaExhausted?: { source: QuotaSource; rawMessage: string };
   totalCostUsd?: number;
   costLimitReached?: { limitUsd: number; actualUsd: number };
+  candidatesFilteredBySage?: number;
+  /**
+   * Candidates the Sage gate could not evaluate. They were retained
+   * (fail-open), so a non-zero count means the gate did less filtering than
+   * the printed total suggests — the CLI surfaces it rather than staying
+   * silent about a gate that never ran.
+   */
+  sageGateErrors?: { count: number; messages: string[] };
+  /**
+   * Candidates the gate never sent to Sage because it could not build a payload
+   * covering them. They are retained, so a non-zero count means the printed
+   * filtered total covers fewer candidates than the run scanned.
+   */
+  sageGateUnevaluated?: number;
+  /** Files skipped entirely because the gate left them with no candidates. */
+  sageGateSkippedFiles?: number;
 }> {
   const { projectId, agentType = "claude-agent-sdk", config = {}, reinvestigate = false } = params;
   // We deliberately don't default `promptTemplate` to DEFAULT_PROMPT_TEMPLATE
@@ -526,6 +607,7 @@ export async function process(params: {
     // primitive and the 1h stale-lock cutoff.
     const lockedAt = new Date().toISOString();
     const claimed: FileRecord[] = [];
+    const preClaimStatus = new Map<string, FileStatus>();
     const inForceMode = !!reinvestigate || params.filePaths !== undefined;
     const releaseProcessLock = await acquireProcessLock(projectId, runId);
     try {
@@ -550,6 +632,10 @@ export async function process(params: {
           continue;
         }
 
+        preClaimStatus.set(
+          record.filePath,
+          current.status === "processing" ? "pending" : current.status,
+        );
         current.status = "processing";
         current.lockedByRunId = runId;
         current.lockedAt = lockedAt;
@@ -574,6 +660,96 @@ export async function process(params: {
       completeRun(projectId, runId, "done", { filesProcessed: 0 });
       return { runId, analysisCount: 0, findingCount: 0, errorBatchCount: 0 };
     }
+
+    let candidatesFilteredBySage: number | undefined;
+    let sageGateErrors: { count: number; messages: string[] } | undefined;
+    let sageGateUnevaluated: number | undefined;
+    let sageGateSkippedFiles: number | undefined;
+    let gatedCandidatesByFile: Map<string, CandidateMatch[]> | undefined;
+    if (params.sageGate) {
+      const gateResult = await filterCandidatesWithSage({
+        records: toProcess,
+        rootPath: effectiveRootPath,
+        threshold: params.sageGateConfidence,
+        sageClient: params.sageClient,
+        onProgress: (p) => emitProgress({ type: "sage_gate", message: p.message }),
+      });
+      candidatesFilteredBySage = gateResult.filteredCount;
+      gatedCandidatesByFile = gateResult.retainedCandidatesByFile;
+      emitProgress({
+        type: "sage_gate",
+        message: `filtered ${candidatesFilteredBySage} candidate(s) (${gateResult.retainedCount} remaining across ${toProcess.length} file(s))`,
+      });
+      if (gateResult.unevaluatedCount > 0) {
+        sageGateUnevaluated = gateResult.unevaluatedCount;
+        emitProgress({
+          type: "sage_gate",
+          message: `${gateResult.unevaluatedCount} candidate(s) were kept without asking Sage — the gate could not build context covering them`,
+        });
+      }
+      if (gateResult.errorCount > 0) {
+        sageGateErrors = { count: gateResult.errorCount, messages: gateResult.errors };
+        emitProgress({
+          type: "sage_gate",
+          message: `${gateResult.errorCount} candidate(s) could not be evaluated and were retained — ${gateResult.errors.join("; ")}`,
+        });
+      }
+
+      // A file whose every candidate was judged benign has nothing left for
+      // the agent to look at. Left in `toProcess` it would be batched as a
+      // record with zero candidates, which the prompt renders as an unbounded
+      // holistic review — the opposite of what the gate is for. Releasing the
+      // claim restores the status the record had before this run took it, so
+      // an already-analyzed file re-run under `--reinvestigate` / direct mode
+      // doesn't get demoted out of `report` and `metrics`.
+      const skipped = toProcess.filter(
+        (r) =>
+          r.candidates.length > 0 && (gatedCandidatesByFile?.get(r.filePath)?.length ?? 0) === 0,
+      );
+      if (skipped.length > 0) {
+        for (const record of skipped) {
+          record.status = preClaimStatus.get(record.filePath) ?? "pending";
+          record.lockedByRunId = undefined;
+          record.lockedAt = undefined;
+          writeFileRecord(record);
+        }
+        const skippedPaths = new Set(skipped.map((r) => r.filePath));
+        toProcess = toProcess.filter((r) => !skippedPaths.has(r.filePath));
+        sageGateSkippedFiles = skipped.length;
+        emitProgress({
+          type: "sage_gate",
+          message: `skipped ${skipped.length} file(s) with no remaining candidates`,
+        });
+      }
+
+      if (toProcess.length === 0) {
+        emitProgress({
+          type: "all_complete",
+          message: "Sage candidate gate filtered every candidate — nothing to investigate.",
+        });
+        completeRun(projectId, runId, "done", { filesProcessed: 0, candidatesFilteredBySage });
+        return {
+          runId,
+          analysisCount: 0,
+          findingCount: 0,
+          errorBatchCount: 0,
+          candidatesFilteredBySage,
+          sageGateErrors,
+          sageGateUnevaluated,
+          sageGateSkippedFiles,
+        };
+      }
+    }
+
+    // The gate never touches persisted scan state, so the records still carry
+    // every candidate. Batches are investigated through this view, which hides
+    // the candidates Sage judged benign from the prompt only.
+    const gatedView = (record: FileRecord): FileRecord => {
+      const retained = gatedCandidatesByFile?.get(record.filePath);
+      return retained && retained.length !== record.candidates.length
+        ? { ...record, candidates: retained }
+        : record;
+    };
 
     const batches = batchCandidates(toProcess, params.batchSize);
     let totalAnalyses = 0;
@@ -618,10 +794,11 @@ export async function process(params: {
         // Custom-template callers don't go through the assembler, so they
         // still need the agent layer to inject INFO.md for them.
         const projectInfoForAgent = customPromptTemplate === undefined ? "" : projectInfo;
+        const gatedBatch = batch.map(gatedView);
         const gen = agent.investigate({
-          batch,
+          batch: gatedBatch,
           projectRoot: effectiveRootPath,
-          promptTemplate: buildBatchPrompt(batch),
+          promptTemplate: buildBatchPrompt(gatedBatch),
           projectInfo: projectInfoForAgent,
           config,
           signal: quotaAbort.signal,
@@ -837,6 +1014,7 @@ export async function process(params: {
       totalInputTokens,
       totalOutputTokens,
       totalDurationMs,
+      candidatesFilteredBySage,
     });
 
     emitProgress({
@@ -854,6 +1032,10 @@ export async function process(params: {
       quotaExhausted,
       totalCostUsd,
       costLimitReached,
+      candidatesFilteredBySage,
+      sageGateErrors,
+      sageGateUnevaluated,
+      sageGateSkippedFiles,
     };
   } catch (err) {
     // Body threw before completing. Flip phase to "error" so the

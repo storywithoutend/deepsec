@@ -141,7 +141,8 @@ The on-disk path mirrors the source path under `<rootPath>` plus a
 | `impact` | `"critical" \| "high" \| "medium" \| "low"` | Blast radius if exploited. |
 | `reasoning` | `string` | Why this priority. |
 | `triagedAt` | `string` (ISO) | Timestamp. |
-| `model` | `string` | Model used for triage. |
+| `model` | `string` | Model that produced this verdict (`claude-sonnet-4-6`, `levanto-sage-v0.8`, …). |
+| `confidence` | `number?` | Calibrated confidence in `priority`, 0-1. Only set by providers that report one (Sage). |
 
 ### `Revalidation` (set by `deepsec revalidate`)
 

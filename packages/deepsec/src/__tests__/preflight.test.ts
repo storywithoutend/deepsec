@@ -23,6 +23,7 @@ import {
   applyAiGatewayDefaults,
   applyConfiguredModelRoute,
   assertAgentCredential,
+  assertSageCredential,
   assertSandboxCredential,
   reconcileAiGatewayDefaultsForRoute,
 } from "../preflight.js";
@@ -413,5 +414,25 @@ describe("applyAiGatewayDefaults", () => {
     expect(process.env.AI_GATEWAY_API_KEY).toBe("oidc-tok");
     expect(process.env.OPENAI_API_KEY).toBe("oidc-tok");
     expect(() => assertAgentCredential("codex", { inSandbox: true })).not.toThrow();
+  });
+});
+
+describe("assertSageCredential", () => {
+  it("passes when SAGE_API_KEY is present", () => {
+    expect(() =>
+      assertSageCredential({ env: { SAGE_API_KEY: "lv_live_test" } as any }),
+    ).not.toThrow();
+  });
+
+  it("passes when LEVANTO_API_KEY is present", () => {
+    expect(() =>
+      assertSageCredential({ env: { LEVANTO_API_KEY: "lv_live_test" } as any }),
+    ).not.toThrow();
+  });
+
+  it("throws actionable error when neither key is set", () => {
+    expect(() => assertSageCredential({ env: {} as any })).toThrow(
+      /Missing API key for Levanto Sage\./,
+    );
   });
 });

@@ -357,3 +357,21 @@ export function assertSandboxCredential(options: { env?: NodeJS.ProcessEnv } = {
       `  Full setup: ${SETUP_DOC_URL}`,
   );
 }
+
+/**
+ * Verify the orchestrator has a Levanto Sage API key for any Sage-backed
+ * feature (`triage --sage`, `process --sage-gate`).
+ * Checks for SAGE_API_KEY or LEVANTO_API_KEY in the environment.
+ */
+export function assertSageCredential(options: { env?: NodeJS.ProcessEnv } = {}): void {
+  const env = options.env ?? process.env;
+  const key = env.SAGE_API_KEY || env.LEVANTO_API_KEY;
+  if (key) return;
+
+  throw new Error(
+    `Missing API key for Levanto Sage.\n` +
+      `\n` +
+      `  Add to environment or .env.local:    SAGE_API_KEY=lv_live_…   (or LEVANTO_API_KEY=…)\n` +
+      `  Sign up or mint an API key at https://platform.levanto.ai`,
+  );
+}

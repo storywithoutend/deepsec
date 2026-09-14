@@ -57,8 +57,9 @@ Other knobs:
 ```
 
 The usual `--agent`, `--model`, `--concurrency`, `--batch-size`,
-`--max-turns`, `--thinking-level` flags work the same as in standard
-mode.
+`--max-turns`, `--thinking-level`, and `--sage-gate` (see
+[Models](models.md#sage-candidate-gate)) flags work the same as in
+standard mode.
 
 ## Auto-created projects
 

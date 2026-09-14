@@ -53,6 +53,7 @@ export const findingSchema = z.object({
       reasoning: z.string(),
       triagedAt: z.string(),
       model: z.string(),
+      confidence: z.number().optional(),
     })
     .optional(),
   revalidation: revalidationSchema.optional(),
@@ -282,6 +283,7 @@ export const runMetaSchema = z.object({
     fixed: z.number().optional(),
     uncertain: z.number().optional(),
     duplicates: z.number().optional(),
+    candidatesFilteredBySage: z.number().optional(),
   }),
 });
 
